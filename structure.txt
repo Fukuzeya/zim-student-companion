@@ -1,0 +1,123 @@
+zim-student-companion/
+│
+├── 📁 backend/                          # FastAPI Backend
+│   ├── 📁 app/
+│   │   ├── __init__.py
+│   │   ├── main.py                      # FastAPI application entry
+│   │   ├── config.py                    # Settings & configuration
+│   │   │
+│   │   ├── 📁 api/                      # API Routes
+│   │   │   ├── __init__.py
+│   │   │   ├── deps.py                  # Dependencies (auth, db)
+│   │   │   ├── 📁 v1/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── router.py            # Main API router
+│   │   │   │   ├── auth.py              # Authentication endpoints
+│   │   │   │   ├── students.py          # Student management
+│   │   │   │   ├── parents.py           # Parent endpoints
+│   │   │   │   ├── practice.py          # Practice sessions
+│   │   │   │   ├── competitions.py      # Competitions
+│   │   │   │   ├── payments.py          # Payment endpoints
+│   │   │   │   ├── admin.py             # Admin endpoints
+│   │   │   │   └── webhooks.py          # WhatsApp webhooks
+│   │   │
+│   │   ├── 📁 models/                   # SQLAlchemy Models
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py                  # Base model class
+│   │   │   ├── user.py                  # User & Student models
+│   │   │   ├── curriculum.py            # Subject, Topic, Question
+│   │   │   ├── practice.py              # Sessions, Attempts
+│   │   │   ├── gamification.py          # XP, Achievements, Streaks
+│   │   │   ├── payment.py               # Subscriptions, Payments
+│   │   │   └── conversation.py          # Chat history
+│   │   │
+│   │   ├── 📁 schemas/                  # Pydantic Schemas
+│   │   │   ├── __init__.py
+│   │   │   ├── user.py
+│   │   │   ├── student.py
+│   │   │   ├── practice.py
+│   │   │   ├── payment.py
+│   │   │   └── responses.py             # Common responses
+│   │   │
+│   │   ├── 📁 services/                 # Business Logic
+│   │   │   ├── __init__.py
+│   │   │   ├── 📁 rag/                  # RAG System
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── config.py            # RAG configuration
+│   │   │   │   ├── document_processor.py
+│   │   │   │   ├── vector_store.py
+│   │   │   │   ├── rag_engine.py
+│   │   │   │   ├── embeddings.py
+│   │   │   │   └── prompts.py           # Prompt templates
+│   │   │   │
+│   │   │   ├── 📁 whatsapp/             # WhatsApp Integration
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── client.py            # WhatsApp API client
+│   │   │   │   ├── handlers.py          # Message handlers
+│   │   │   │   ├── flows.py             # Conversation flows
+│   │   │   │   └── templates.py         # Message templates
+│   │   │   │
+│   │   │   ├── 📁 practice/             # Practice System
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── session_manager.py
+│   │   │   │   ├── question_selector.py
+│   │   │   │   ├── answer_evaluator.py
+│   │   │   │   └── adaptive_difficulty.py
+│   │   │   │
+│   │   │   ├── 📁 gamification/         # Gamification
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── xp_system.py
+│   │   │   │   ├── achievements.py
+│   │   │   │   ├── streaks.py
+│   │   │   │   └── leaderboards.py
+│   │   │   │
+│   │   │   ├── 📁 payments/             # Payment Processing
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── paynow_client.py
+│   │   │   │   └── subscription_manager.py
+│   │   │   │
+│   │   │   ├── 📁 notifications/        # Notifications
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── parent_reports.py
+│   │   │   │   └── push_notifications.py
+│   │   │   │
+│   │   │   └── 📁 analytics/            # Analytics
+│   │   │       ├── __init__.py
+│   │   │       ├── student_progress.py
+│   │   │       └── reports.py
+│   │   │
+│   │   ├── 📁 core/                     # Core Utilities
+│   │   │   ├── __init__.py
+│   │   │   ├── database.py              # DB connection
+│   │   │   ├── redis.py                 # Redis connection
+│   │   │   ├── security.py              # Auth & JWT
+│   │   │   ├── cache.py                 # Caching utilities
+│   │   │   └── exceptions.py            # Custom exceptions
+│   │   │
+│   │   └── 📁 tasks/                    # Celery Tasks
+│   │       ├── __init__.py
+│   │       ├── celery_app.py
+│   │       ├── daily_tasks.py           # Daily question generation
+│   │       ├── report_tasks.py          # Parent reports
+│   │       └── cleanup_tasks.py         # Data cleanup
+│   │
+│   ├── 📁 alembic/                      # Database Migrations
+│   │   ├── env.py
+│   │   ├── versions/
+│   │   └── alembic.ini
+│   │
+│   ├── 📁 scripts/                      # Utility Scripts
+│   │   ├── ingest_documents.py          # Bulk document ingestion
+│   │   ├── seed_subjects.py             # Seed curriculum data
+│   │   └── create_admin.py              # Create admin user
+│   │
+│   ├── 📁 tests/                        # Tests
+│   │   ├── __init__.py
+│   │   ├── conftest.py
+│   │   ├── test_rag.py
+│   │   ├── test_whatsapp.py
+│   │   └── test_practice.py
+│   │
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── docker-compose.yml

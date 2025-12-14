@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     
     # Gemini AI - Optional with empty default
-    GEMINI_API_KEY: str = "AIzaSyAg9ezkdAkA6KwBwtuiDI2J8DDoDmt27vQ"
+    GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"
     
