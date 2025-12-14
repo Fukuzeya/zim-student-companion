@@ -1,0 +1,220 @@
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # API Service - FastAPI Backend
+  # ==========================================================================
+  api:
+    image: ghcr.io/${GITHUB_REPOSITORY:-youruser/zim-student-companion}:${IMAGE_TAG:-latest}
+    container_name: zsc-api
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+      # AI
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # WhatsApp
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
+      # Paynow
+      - PAYNOW_INTEGRATION_ID=${PAYNOW_INTEGRATION_ID}
+      - PAYNOW_INTEGRATION_KEY=${PAYNOW_INTEGRATION_KEY}
+      - PAYNOW_RESULT_URL=${PAYNOW_RESULT_URL}
+      - PAYNOW_RETURN_URL=${PAYNOW_RETURN_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - zsc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: zsc-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups  # For backup scripts
+    networks:
+      - zsc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ==========================================================================
+  # Redis Cache & Message Queue
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: zsc-redis
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - zsc-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+
+  # ==========================================================================
+  # Qdrant Vector Database
+  # ==========================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: zsc-qdrant
+    restart: always
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - zsc-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ==========================================================================
+  # Celery Worker - Background Tasks
+  # ==========================================================================
+  celery-worker:
+    image: ghcr.io/${GITHUB_REPOSITORY:-youruser/zim-student-companion}:${IMAGE_TAG:-latest}
+    container_name: zsc-celery-worker
+    restart: always
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+    depends_on:
+      - postgres
+      - redis
+      - api
+    networks:
+      - zsc-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================================================
+  # Celery Beat - Task Scheduler
+  # ==========================================================================
+  celery-beat:
+    image: ghcr.io/${GITHUB_REPOSITORY:-youruser/zim-student-companion}:${IMAGE_TAG:-latest}
+    container_name: zsc-celery-beat
+    restart: always
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      - redis
+      - celery-worker
+    networks:
+      - zsc-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+
+  # ==========================================================================
+  # Nginx - Reverse Proxy & SSL Termination
+  # ==========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: zsc-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - api
+    networks:
+      - zsc-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ==========================================================================
+# Named Volumes
+# ==========================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  zsc-network:
+    driver: bridge
