@@ -1,99 +1,273 @@
 # ============================================================================
-# Enhanced RAG Engine for Zim Student Companion
-# Compatible with the Advanced Vector Store
+# RAG Engine
 # ============================================================================
-from typing import List, Dict, Any, Optional, Tuple
-import google.generativeai as genai
-import logging
-import json
-import asyncio
-from dataclasses import dataclass
-from enum import Enum
+"""
+Main RAG orchestrator that combines all components:
+- Retrieval with multiple strategies
+- Context building and compression
+- Response generation with mode-specific behavior
+- Caching and performance optimization
+- Comprehensive observability
+"""
+from __future__ import annotations
 
-from app.services.rag.vector_store import VectorStore
+import asyncio
+import json
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import google.generativeai as genai
+
+from app.services.rag.config import (
+    RAGConfig, GenerationConfig, RetrievalStrategy, get_rag_config
+)
+from app.services.rag.embeddings import EmbeddingService
+from app.services.rag.vector_store import VectorStore, SearchResult
+from app.services.rag.retriever import Retriever, RetrievalResult, StudentContext
+from app.services.rag.prompts import (
+    ResponseMode, DifficultyLevel, PromptContext, PromptBuilder
+)
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Enums and Data Classes
-# ============================================================================
-class ResponseMode(str, Enum):
-    """Available response modes for the tutor"""
-    SOCRATIC = "socratic"
-    EXPLAIN = "explain"
-    PRACTICE = "practice"
-    HINT = "hint"
-    SUMMARY = "summary"
-    QUIZ = "quiz"
 
-class DifficultyLevel(str, Enum):
-    """Question difficulty levels"""
-    EASY = "easy"
-    MEDIUM = "medium"
-    HARD = "hard"
-
+# ============================================================================
+# Data Classes
+# ============================================================================
 @dataclass
 class RAGResponse:
-    """Structured response from RAG engine"""
+    """Complete response from RAG pipeline"""
     response_text: str
     retrieved_docs: List[Dict[str, Any]]
-    confidence_score: float
     mode_used: str
-    context_used: bool
+    confidence_score: float
+    
+    # Timing metrics
+    retrieval_time_ms: float = 0.0
+    generation_time_ms: float = 0.0
+    total_time_ms: float = 0.0
+    
+    # Metadata
+    context_used: bool = True
+    tokens_used: int = 0
+    query_variations: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "response": self.response_text,
+            "documents": self.retrieved_docs,
+            "mode": self.mode_used,
+            "confidence": self.confidence_score,
+            "timing": {
+                "retrieval_ms": self.retrieval_time_ms,
+                "generation_ms": self.generation_time_ms,
+                "total_ms": self.total_time_ms,
+            },
+            "metadata": self.metadata,
+        }
+
+
+@dataclass
+class GenerationSettings:
+    """Settings for LLM generation"""
+    temperature: float = 0.7
+    top_p: float = 0.9
+    top_k: int = 40
+    max_output_tokens: int = 1024
+    
+    @classmethod
+    def for_mode(cls, mode: ResponseMode) -> "GenerationSettings":
+        """Get optimized settings for each mode"""
+        settings_map = {
+            ResponseMode.SOCRATIC: cls(temperature=0.7, max_output_tokens=800),
+            ResponseMode.EXPLAIN: cls(temperature=0.5, max_output_tokens=1200),
+            ResponseMode.PRACTICE: cls(temperature=0.6, max_output_tokens=600),
+            ResponseMode.HINT: cls(temperature=0.6, max_output_tokens=400),
+            ResponseMode.SUMMARY: cls(temperature=0.4, max_output_tokens=600),
+            ResponseMode.QUIZ: cls(temperature=0.7, max_output_tokens=800),
+            ResponseMode.MARKING: cls(temperature=0.3, max_output_tokens=800),
+        }
+        return settings_map.get(mode, cls())
+
 
 # ============================================================================
-# RAG Engine Implementation
+# Context Builder
+# ============================================================================
+class ContextBuilder:
+    """Build and compress context from retrieved documents"""
+    
+    def __init__(self, max_context_tokens: int = 6000):
+        self.max_tokens = max_context_tokens
+    
+    def build_context(
+        self,
+        documents: List[SearchResult],
+        query: str,
+        max_docs: int = 5
+    ) -> str:
+        """
+        Build context string from retrieved documents.
+        Prioritizes most relevant content within token limits.
+        """
+        if not documents:
+            return ""
+        
+        context_parts = []
+        total_tokens = 0
+        
+        for i, doc in enumerate(documents[:max_docs], 1):
+            # Format source info
+            source_info = self._format_source(doc, i)
+            
+            # Estimate tokens (rough: 1 token ≈ 4 chars)
+            content = doc.content
+            entry_tokens = len(f"{source_info}\n{content}") // 4
+            
+            # Check if we can fit this document
+            if total_tokens + entry_tokens > self.max_tokens:
+                # Try to fit truncated version
+                remaining_tokens = self.max_tokens - total_tokens - len(source_info) // 4
+                if remaining_tokens > 100:
+                    max_chars = remaining_tokens * 4
+                    content = content[:max_chars] + "..."
+                else:
+                    break
+            
+            context_parts.append(f"{source_info}\n{content}")
+            total_tokens += entry_tokens
+        
+        return "\n\n---\n\n".join(context_parts)
+    
+    def _format_source(self, doc: SearchResult, index: int) -> str:
+        """Format source attribution for a document"""
+        meta = doc.metadata
+        parts = [f"[Source {index}"]
+        
+        if doc_type := meta.get("document_type"):
+            type_emoji = {
+                "past_paper": "📝",
+                "marking_scheme": "✅",
+                "syllabus": "📋",
+                "textbook": "📖",
+                "teacher_notes": "📒",
+            }.get(doc_type, "📄")
+            parts.append(f": {type_emoji} {doc_type.replace('_', ' ').title()}")
+        
+        if subject := meta.get("subject"):
+            parts.append(f" - {subject}")
+        
+        if year := meta.get("year"):
+            parts.append(f" ({year})")
+        
+        if topic := meta.get("topic"):
+            parts.append(f" | Topic: {topic}")
+        
+        # Quality indicator
+        if doc.combined_score > 0.7:
+            parts.append(" ⭐")
+        
+        parts.append("]")
+        return "".join(parts)
+
+
+# ============================================================================
+# Main RAG Engine
 # ============================================================================
 class RAGEngine:
-    """Enhanced RAG engine for Zim Student Companion with advanced features"""
+    """
+    Production-ready RAG engine for ZIMSEC educational tutoring.
     
-    def __init__(self, vector_store: VectorStore, settings):
-        self.vector_store = vector_store
-        self.settings = settings
+    Features:
+    - Multiple response modes (Socratic, Explain, Practice, etc.)
+    - Hybrid retrieval with fallback strategies
+    - Adaptive response generation
+    - Comprehensive caching and optimization
+    - Full observability and metrics
+    
+    Usage:
+        engine = RAGEngine(settings)
+        await engine.initialize()
         
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        self.model = genai.GenerativeModel(
-            getattr(settings, 'GEMINI_MODEL', 'gemini-1.5-flash')
+        response = await engine.query(
+            question="Explain photosynthesis",
+            student_context={"grade": "Form 3", "subject": "Biology"},
+            mode="explain"
+        )
+    """
+    
+    def __init__(
+        self,
+        settings,
+        config: Optional[RAGConfig] = None,
+        vector_store: Optional[VectorStore] = None,
+        embedding_service: Optional[EmbeddingService] = None,
+    ):
+        """
+        Initialize RAG engine.
+        
+        Args:
+            settings: Application settings
+            config: Optional RAG configuration override
+            vector_store: Optional pre-initialized vector store
+            embedding_service: Optional pre-initialized embedding service
+        """
+        self.settings = settings
+        self.config = config or get_rag_config()
+        
+        # Initialize components
+        self._embedding_service = embedding_service or EmbeddingService(
+            api_key=settings.GEMINI_API_KEY,
+            config=self.config.embedding
         )
         
-        # Configuration
-        self._max_context_length = getattr(settings, 'MAX_CONTEXT_LENGTH', 8000)
-        self._max_history_messages = getattr(settings, 'MAX_HISTORY_MESSAGES', 5)
-        self._default_search_limit = getattr(settings, 'DEFAULT_SEARCH_LIMIT', 5)
+        self._vector_store = vector_store or VectorStore(
+            settings=settings,
+            embedding_service=self._embedding_service
+        )
         
-        # Response mode configurations
-        self._mode_configs = {
-            ResponseMode.SOCRATIC: {
-                "temperature": 0.7,
-                "max_tokens": 800,
-                "system_modifier": "Guide through questions, never give direct answers"
-            },
-            ResponseMode.EXPLAIN: {
-                "temperature": 0.5,
-                "max_tokens": 1200,
-                "system_modifier": "Explain concepts clearly and thoroughly"
-            },
-            ResponseMode.PRACTICE: {
-                "temperature": 0.6,
-                "max_tokens": 600,
-                "system_modifier": "Present practice questions and provide feedback"
-            },
-            ResponseMode.HINT: {
-                "temperature": 0.6,
-                "max_tokens": 400,
-                "system_modifier": "Provide small, helpful hints without revealing answers"
-            },
-            ResponseMode.SUMMARY: {
-                "temperature": 0.4,
-                "max_tokens": 600,
-                "system_modifier": "Summarize key points concisely"
-            },
-            ResponseMode.QUIZ: {
-                "temperature": 0.7,
-                "max_tokens": 800,
-                "system_modifier": "Generate quiz questions to test understanding"
-            }
+        self._retriever: Optional[Retriever] = None
+        self._context_builder = ContextBuilder()
+        
+        # Initialize Gemini model
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        self._model = genai.GenerativeModel(self.config.generation.model)
+        
+        # Metrics
+        self._stats = {
+            "queries_processed": 0,
+            "total_retrieval_time_ms": 0,
+            "total_generation_time_ms": 0,
+            "cache_hits": 0,
+            "errors": 0,
         }
+        
+        self._initialized = False
+    
+    async def initialize(self) -> None:
+        """Initialize all components"""
+        if self._initialized:
+            return
+        
+        logger.info("Initializing RAG Engine...")
+        
+        # Initialize vector store collections
+        await self._vector_store.initialize_collections()
+        
+        # Initialize retriever
+        self._retriever = Retriever(
+            vector_store=self._vector_store,
+            embedding_service=self._embedding_service,
+            settings=self.settings,
+            config=self.config.retrieval
+        )
+        
+        self._initialized = True
+        logger.info("✓ RAG Engine initialized")
     
     # ==================== Main Query Method ====================
     
@@ -101,7 +275,7 @@ class RAGEngine:
         self,
         question: str,
         student_context: Dict[str, Any],
-        conversation_history: List[Dict[str, str]] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
         mode: str = "socratic"
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
@@ -116,410 +290,101 @@ class RAGEngine:
         Returns:
             Tuple of (response_text, retrieved_documents)
         """
-        try:
-            # Parse mode
-            response_mode = ResponseMode(mode.lower()) if mode else ResponseMode.SOCRATIC
-        except ValueError:
-            response_mode = ResponseMode.SOCRATIC
-            logger.warning(f"Invalid mode '{mode}', defaulting to socratic")
-        
-        # Step 1: Build search filters from student context
-        filters = self._build_search_filters(student_context)
-        
-        # Step 2: Determine search strategy based on question type
-        search_query = self._enhance_search_query(question, student_context)
-        
-        # Step 3: Retrieve relevant documents using hybrid search
-        retrieved_docs = await self._retrieve_documents(
-            query=search_query,
-            filters=filters,
-            limit=self._default_search_limit
-        )
-        
-        # Step 4: Build context from retrieved documents
-        context = self._build_context(retrieved_docs)
-        
-        # Step 5: Build the prompt based on mode
-        prompt = self._build_prompt(
-            question=question,
-            context=context,
-            student_context=student_context,
-            conversation_history=conversation_history or [],
-            mode=response_mode
-        )
-        
-        # Step 6: Generate response with appropriate settings
-        response = await self._generate_response(prompt, response_mode)
-        
-        # Step 7: Post-process response
-        processed_response = self._post_process_response(response, response_mode)
-        
-        return processed_response, retrieved_docs
-    
-    async def query_with_metadata(
-        self,
-        question: str,
-        student_context: Dict[str, Any],
-        conversation_history: List[Dict[str, str]] = None,
-        mode: str = "socratic"
-    ) -> RAGResponse:
-        """
-        Query with full metadata response.
-        """
-        response_text, retrieved_docs = await self.query(
+        response = await self.query_with_metadata(
             question=question,
             student_context=student_context,
             conversation_history=conversation_history,
             mode=mode
         )
         
-        # Calculate confidence based on retrieval scores
-        confidence = self._calculate_confidence(retrieved_docs)
+        return response.response_text, response.retrieved_docs
+    
+    async def query_with_metadata(
+        self,
+        question: str,
+        student_context: Dict[str, Any],
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        mode: str = "socratic"
+    ) -> RAGResponse:
+        """
+        Query with full metadata response.
+        
+        Returns:
+            RAGResponse with complete response data and metrics
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        start_time = time.time()
+        self._stats["queries_processed"] += 1
+        
+        # Parse response mode
+        try:
+            response_mode = ResponseMode(mode.lower())
+        except ValueError:
+            response_mode = ResponseMode.SOCRATIC
+            logger.warning(f"Invalid mode '{mode}', defaulting to socratic")
+        
+        # Build student context object
+        ctx = self._build_student_context(student_context)
+        
+        # Step 1: Retrieve relevant documents
+        retrieval_start = time.time()
+        retrieval_result = await self._retriever.retrieve_with_fallback(
+            query=question,
+            context=ctx
+        )
+        retrieval_time = (time.time() - retrieval_start) * 1000
+        
+        # Step 2: Build context from documents
+        context_str = self._context_builder.build_context(
+            documents=retrieval_result.documents,
+            query=question
+        )
+        
+        # Step 3: Build prompt
+        prompt_context = self._build_prompt_context(student_context, response_mode)
+        prompt = PromptBuilder.build(
+            mode=response_mode,
+            context=prompt_context,
+            retrieved_context=context_str,
+            conversation_history=conversation_history,
+            query=question
+        )
+        
+        # Step 4: Generate response
+        generation_start = time.time()
+        settings = GenerationSettings.for_mode(response_mode)
+        response_text = await self._generate_response(prompt, settings)
+        generation_time = (time.time() - generation_start) * 1000
+        
+        # Step 5: Post-process response
+        response_text = self._post_process_response(response_text, response_mode)
+        
+        # Calculate metrics
+        total_time = (time.time() - start_time) * 1000
+        confidence = self._calculate_confidence(retrieval_result.documents)
+        
+        # Update stats
+        self._stats["total_retrieval_time_ms"] += retrieval_time
+        self._stats["total_generation_time_ms"] += generation_time
         
         return RAGResponse(
             response_text=response_text,
-            retrieved_docs=retrieved_docs,
+            retrieved_docs=[d.to_dict() for d in retrieval_result.documents],
+            mode_used=response_mode.value,
             confidence_score=confidence,
-            mode_used=mode,
-            context_used=len(retrieved_docs) > 0
+            retrieval_time_ms=retrieval_time,
+            generation_time_ms=generation_time,
+            total_time_ms=total_time,
+            context_used=len(retrieval_result.documents) > 0,
+            query_variations=retrieval_result.query_variations,
+            metadata={
+                "strategy_used": retrieval_result.strategy_used,
+                "total_candidates": retrieval_result.total_candidates,
+                **retrieval_result.metadata
+            }
         )
-    
-    # ==================== Document Retrieval ====================
-    
-    def _build_search_filters(self, student_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Build search filters from student context"""
-        filters = {}
-        
-        # Map student context to filter fields
-        field_mappings = {
-            "education_level": "education_level",
-            "grade": "grade",
-            "current_subject": "subject",
-            "subject": "subject"
-        }
-        
-        for context_key, filter_key in field_mappings.items():
-            value = student_context.get(context_key)
-            if value and filter_key not in filters:
-                filters[filter_key] = value
-        
-        return {k: v for k, v in filters.items() if v}
-    
-    def _enhance_search_query(self, question: str, student_context: Dict[str, Any]) -> str:
-        """Enhance search query with context for better retrieval"""
-        enhanced = question
-        
-        # Add subject context if available
-        subject = student_context.get("current_subject") or student_context.get("subject")
-        if subject and subject.lower() not in question.lower():
-            enhanced = f"{subject}: {question}"
-        
-        return enhanced
-    
-    async def _retrieve_documents(
-        self,
-        query: str,
-        filters: Dict[str, Any],
-        limit: int
-    ) -> List[Dict[str, Any]]:
-        """Retrieve documents using hybrid search with fallback"""
-        try:
-            # Try hybrid search first
-            docs = await self.vector_store.hybrid_search(
-                query=query,
-                filters=filters if filters else None,
-                limit=limit
-            )
-            
-            # If no results with filters, try without
-            if not docs and filters:
-                logger.info("No filtered results, trying broader search")
-                docs = await self.vector_store.hybrid_search(
-                    query=query,
-                    filters=None,
-                    limit=limit
-                )
-            
-            return docs
-            
-        except Exception as e:
-            logger.error(f"Document retrieval failed: {e}")
-            return []
-    
-    # ==================== Context Building ====================
-    
-    def _build_context(self, documents: List[Dict[str, Any]]) -> str:
-        """Build context string from retrieved documents with smart truncation"""
-        if not documents:
-            return "No specific curriculum context available."
-        
-        context_parts = []
-        total_length = 0
-        
-        for i, doc in enumerate(documents, 1):
-            # Build source info
-            source_info = self._format_source_info(doc, i)
-            
-            # Get content with length check
-            content = doc.get("content", "")
-            
-            # Check if adding this would exceed limit
-            entry = f"{source_info}\n{content}"
-            if total_length + len(entry) > self._max_context_length:
-                # Truncate content to fit
-                remaining = self._max_context_length - total_length - len(source_info) - 50
-                if remaining > 200:
-                    content = content[:remaining] + "..."
-                    entry = f"{source_info}\n{content}"
-                else:
-                    break
-            
-            context_parts.append(entry)
-            total_length += len(entry)
-        
-        return "\n\n---\n\n".join(context_parts)
-    
-    def _format_source_info(self, doc: Dict[str, Any], index: int) -> str:
-        """Format source information for context"""
-        metadata = doc.get("metadata", {})
-        
-        parts = [f"[Source {index}"]
-        
-        if doc_type := metadata.get("document_type"):
-            parts.append(f": {doc_type}")
-        
-        if subject := metadata.get("subject"):
-            parts.append(f" - {subject}")
-        
-        if year := metadata.get("year"):
-            parts.append(f" ({year})")
-        
-        if topic := metadata.get("topic"):
-            parts.append(f" | Topic: {topic}")
-        
-        # Add relevance score if high
-        score = doc.get("combined_score") or doc.get("score", 0)
-        if score > 0.7:
-            parts.append(" ⭐")
-        
-        parts.append("]")
-        return "".join(parts)
-    
-    # ==================== Prompt Building ====================
-    
-    def _build_prompt(
-        self,
-        question: str,
-        context: str,
-        student_context: Dict[str, Any],
-        conversation_history: List[Dict[str, str]],
-        mode: ResponseMode
-    ) -> str:
-        """Build the complete prompt for generation"""
-        
-        # Base system instruction
-        system_prompt = self._build_system_prompt(student_context, mode)
-        
-        # Mode-specific instructions
-        mode_instructions = self._get_mode_instructions(mode)
-        
-        # Conversation context
-        conv_context = self._format_conversation_history(conversation_history)
-        
-        # Assemble final prompt
-        full_prompt = f"""{system_prompt}
-
-{mode_instructions}
-
-CURRICULUM CONTEXT (from ZIMSEC materials):
-{context}
-
-{conv_context}
-
-Student's current message: {question}
-
-Respond as the helpful ZIMSEC tutor:"""
-        
-        return full_prompt
-    
-    def _build_system_prompt(self, student_context: Dict[str, Any], mode: ResponseMode) -> str:
-        """Build the system prompt with student context"""
-        grade = student_context.get('grade', 'student')
-        subject = student_context.get('current_subject', student_context.get('subject', 'their subjects'))
-        name = student_context.get('first_name', 'Student')
-        language = student_context.get('preferred_language', 'English')
-        
-        return f"""You are a friendly and encouraging AI tutor for Zimbabwean students, 
-specializing in ZIMSEC curriculum. You're helping a {grade} student studying {subject}.
-
-Student's name: {name}
-Preferred language: {language}
-Current mode: {mode.value.upper()}
-
-IMPORTANT GUIDELINES:
-1. Be warm, patient, and encouraging - use the student's name occasionally
-2. Use examples relevant to Zimbabwe (ZWL currency, local places, Zimbabwean context)
-3. Keep responses concise for WhatsApp (under 300 words unless explaining complex concepts)
-4. Use emojis sparingly but appropriately 🎓
-5. If the student seems confused, break things down further
-6. Always encourage and celebrate progress
-7. Relate concepts to real-world applications when possible"""
-    
-    def _get_mode_instructions(self, mode: ResponseMode) -> str:
-        """Get specific instructions for each response mode"""
-        instructions = {
-            ResponseMode.SOCRATIC: """
-SOCRATIC MODE - Guide through discovery! 🤔
-- NEVER give direct answers
-- Ask leading questions that help them think through the problem
-- Break complex problems into smaller, manageable steps
-- When they get stuck, provide gentle hints
-- Celebrate their progress and "aha!" moments
-- If they're close, encourage them to keep going
-- Use phrases like "What do you think would happen if...?" or "Can you remember what we learned about...?"
-""",
-            ResponseMode.EXPLAIN: """
-EXPLAIN MODE - Teach clearly! 📚
-- Explain the concept step by step
-- Use simple language appropriate for their grade level
-- Include relevant examples from the ZIMSEC curriculum
-- Connect to things they already know
-- Use analogies from everyday Zimbabwean life
-- End with a simple check question to verify understanding
-""",
-            ResponseMode.PRACTICE: """
-PRACTICE MODE - Let's practice! ✍️
-- Present the question clearly
-- Wait for their answer before providing feedback
-- If correct, congratulate warmly and explain why it's correct
-- If incorrect, guide them toward the right approach without giving away the answer
-- Encourage them to try again
-- Track difficulty and adjust accordingly
-""",
-            ResponseMode.HINT: """
-HINT MODE - Small nudges only! 💡
-- Give ONE small hint at a time
-- Don't reveal too much of the answer
-- Connect to concepts they should already know
-- Encourage them to try again with the hint
-- Make hints progressively more helpful if they're still stuck
-""",
-            ResponseMode.SUMMARY: """
-SUMMARY MODE - Key points only! 📝
-- Provide a clear, concise summary
-- Use bullet points for key concepts
-- Highlight the most important takeaways
-- Include memory aids or mnemonics if helpful
-- Keep it brief and scannable
-""",
-            ResponseMode.QUIZ: """
-QUIZ MODE - Test knowledge! 🎯
-- Generate relevant questions based on the topic
-- Mix question types (multiple choice, short answer)
-- Provide immediate feedback on answers
-- Explain why correct answers are correct
-- Offer encouragement regardless of performance
-"""
-        }
-        return instructions.get(mode, instructions[ResponseMode.SOCRATIC])
-    
-    def _format_conversation_history(self, history: List[Dict[str, str]]) -> str:
-        """Format conversation history for context"""
-        if not history:
-            return ""
-        
-        # Take only recent messages
-        recent = history[-self._max_history_messages:]
-        
-        formatted = "\nPrevious conversation:\n"
-        for msg in recent:
-            role = "Student" if msg.get("role") == "user" else "Tutor"
-            content = msg.get("content", "")[:500]  # Truncate long messages
-            formatted += f"{role}: {content}\n"
-        
-        return formatted
-    
-    # ==================== Response Generation ====================
-    
-    async def _generate_response(self, prompt: str, mode: ResponseMode) -> str:
-        """Generate response using Gemini with mode-specific settings"""
-        config = self._mode_configs.get(mode, self._mode_configs[ResponseMode.SOCRATIC])
-        
-        try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=config["temperature"],
-                    top_p=0.9,
-                    max_output_tokens=config["max_tokens"]
-                ),
-                safety_settings={
-                    'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-                    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-                    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
-                }
-            )
-            return response.text
-            
-        except Exception as e:
-            logger.error(f"Response generation failed: {e}")
-            return self._get_fallback_response(mode)
-    
-    def _post_process_response(self, response: str, mode: ResponseMode) -> str:
-        """Post-process the generated response"""
-        if not response:
-            return self._get_fallback_response(mode)
-        
-        # Clean up any artifacts
-        response = response.strip()
-        
-        # Ensure response isn't too long for WhatsApp
-        if len(response) > 1500 and mode != ResponseMode.EXPLAIN:
-            # Try to find a good breaking point
-            break_point = response.rfind('.', 0, 1400)
-            if break_point > 1000:
-                response = response[:break_point + 1]
-                response += "\n\n(Let me know if you'd like me to continue! 😊)"
-        
-        return response
-    
-    def _get_fallback_response(self, mode: ResponseMode) -> str:
-        """Get a fallback response when generation fails"""
-        fallbacks = {
-            ResponseMode.SOCRATIC: "I'm having a small hiccup right now 🙈 Could you try asking your question again? I'm here to help you think through it!",
-            ResponseMode.EXPLAIN: "I'm experiencing a brief issue 🙏 Please try again, and I'll explain the concept clearly for you!",
-            ResponseMode.PRACTICE: "Let me reset for a moment 🔄 Ask me again and we'll practice together!",
-            ResponseMode.HINT: "Oops, let me try again 💡 What part are you stuck on?",
-            ResponseMode.SUMMARY: "I need a moment to gather my thoughts 📝 Could you tell me what topic you'd like summarized?",
-            ResponseMode.QUIZ: "Let me prepare a fresh quiz for you 🎯 What topic should we test?"
-        }
-        return fallbacks.get(mode, "I'm having trouble right now. Please try again in a moment. 🙏")
-    
-    # ==================== Confidence Calculation ====================
-    
-    def _calculate_confidence(self, docs: List[Dict[str, Any]]) -> float:
-        """Calculate confidence score based on retrieval quality"""
-        if not docs:
-            return 0.3  # Low confidence without context
-        
-        # Use top scores
-        scores = [doc.get("combined_score") or doc.get("score", 0) for doc in docs[:3]]
-        
-        if not scores:
-            return 0.4
-        
-        avg_score = sum(scores) / len(scores)
-        top_score = max(scores)
-        
-        # Weight toward top score
-        confidence = (top_score * 0.6) + (avg_score * 0.4)
-        
-        # Boost if multiple good results
-        if len([s for s in scores if s > 0.5]) >= 2:
-            confidence = min(confidence + 0.1, 1.0)
-        
-        return round(confidence, 2)
     
     # ==================== Practice Question Generation ====================
     
@@ -529,105 +394,309 @@ QUIZ MODE - Test knowledge! 🎯
         difficulty: str,
         student_context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Generate a practice question based on topic and difficulty"""
+        """
+        Generate a practice question based on topic and difficulty.
         
+        Args:
+            topic: Topic for the question
+            difficulty: Difficulty level (easy, medium, hard, exam)
+            student_context: Student information
+        
+        Returns:
+            Question dictionary with question, options, answer, etc.
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        # Parse difficulty
         try:
-            difficulty_level = DifficultyLevel(difficulty.lower())
+            diff_level = DifficultyLevel(difficulty.lower())
         except ValueError:
-            difficulty_level = DifficultyLevel.MEDIUM
+            diff_level = DifficultyLevel.MEDIUM
         
-        # Build filters
-        filters = self._build_search_filters(student_context)
+        # Build context
+        ctx = self._build_student_context(student_context)
         
-        # Search for relevant content
-        subject = student_context.get('current_subject', student_context.get('subject', ''))
-        search_query = f"{topic} {subject} questions exercises problems"
-        
-        docs = await self._retrieve_documents(
+        # Retrieve relevant content for question generation
+        search_query = f"{topic} {ctx.subject or ''} questions examples"
+        retrieval_result = await self._retriever.retrieve(
             query=search_query,
-            filters=filters,
-            limit=3
+            context=ctx
         )
         
-        context = self._build_context(docs)
-        grade = student_context.get('grade', 'Form 4')
+        context_str = self._context_builder.build_context(
+            documents=retrieval_result.documents[:3],
+            query=search_query
+        )
         
-        prompt = f"""Based on this ZIMSEC curriculum content, generate ONE {difficulty_level.value} 
-practice question for a {grade} student on the topic of {topic}.
-
-The question should:
-- Be appropriate for ZIMSEC {grade} level
-- Test understanding, not just memorization
-- Be clear and unambiguous
-- {"Be straightforward and test basic concepts" if difficulty_level == DifficultyLevel.EASY else ""}
-- {"Require application of concepts" if difficulty_level == DifficultyLevel.MEDIUM else ""}
-- {"Challenge deeper understanding and problem-solving" if difficulty_level == DifficultyLevel.HARD else ""}
-
-Context from curriculum materials:
-{context}
-
-Generate a question in this exact JSON format (no markdown, just JSON):
-{{
-    "question": "The question text here",
-    "question_type": "multiple_choice" or "short_answer",
-    "options": ["A) option1", "B) option2", "C) option3", "D) option4"],
-    "correct_answer": "The correct answer",
-    "hint": "A helpful hint without giving away the answer",
-    "explanation": "Why this is the correct answer",
-    "topic": "{topic}",
-    "difficulty": "{difficulty_level.value}"
-}}
-
-Return ONLY valid JSON, no other text or markdown."""
-
-        response = await self._generate_response(prompt, ResponseMode.PRACTICE)
+        # Build question generation prompt
+        prompt = PromptBuilder.build_question_prompt(
+            subject=ctx.subject or student_context.get("subject", ""),
+            topic=topic,
+            grade=ctx.grade,
+            difficulty=diff_level,
+            question_type="mixed",
+            context=context_str
+        )
         
-        # Parse JSON from response
-        return self._parse_question_json(response, topic, difficulty_level.value)
+        # Generate question
+        settings = GenerationSettings(temperature=0.7, max_output_tokens=800)
+        response = await self._generate_response(prompt, settings)
+        
+        # Parse JSON response
+        return self._parse_question_json(response, topic, diff_level.value)
     
-    def _parse_question_json(self, response: str, topic: str, difficulty: str) -> Dict[str, Any]:
+    async def generate_daily_questions(
+        self,
+        student_context: Dict[str, Any],
+        num_questions: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Generate a set of daily practice questions"""
+        questions = []
+        topics = student_context.get("topics", [])
+        
+        if not topics:
+            # Default topics based on subject
+            subject = student_context.get("subject", "").lower()
+            topics = self._get_default_topics(subject)
+        
+        difficulties = ["easy", "easy", "medium", "medium", "hard"]
+        
+        for i, diff in enumerate(difficulties[:num_questions]):
+            topic = topics[i % len(topics)] if topics else "general"
+            try:
+                question = await self.generate_practice_question(
+                    topic=topic,
+                    difficulty=diff,
+                    student_context=student_context
+                )
+                questions.append(question)
+            except Exception as e:
+                logger.error(f"Failed to generate question: {e}")
+        
+        return questions
+    
+    # ==================== Answer Checking ====================
+    
+    async def check_answer(
+        self,
+        question: str,
+        student_answer: str,
+        correct_answer: str,
+        student_context: Dict[str, Any],
+        marking_scheme: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Check a student's answer and provide feedback.
+        
+        Returns:
+            Dict with is_correct, feedback, marks, explanation
+        """
+        name = student_context.get("first_name", "there")
+        total_marks = student_context.get("marks", 4)
+        
+        prompt_ctx = PromptContext(
+            student_name=name,
+            question_text=question,
+            correct_answer=correct_answer,
+            marking_scheme=marking_scheme,
+            student_answer=student_answer,
+            total_marks=total_marks
+        )
+        
+        prompt = PromptBuilder.build(
+            mode=ResponseMode.MARKING,
+            context=prompt_ctx,
+            query=""
+        )
+        
+        # Add JSON format request
+        prompt += """
+
+Respond with ONLY valid JSON in this format:
+{
+    "is_correct": true/false,
+    "marks_earned": <number>,
+    "feedback": "Specific feedback message",
+    "explanation": "Why this is/isn't correct",
+    "encouragement": "Motivating message"
+}"""
+        
+        settings = GenerationSettings(temperature=0.3, max_output_tokens=500)
+        response = await self._generate_response(prompt, settings)
+        
+        try:
+            # Clean and parse JSON
+            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except Exception as e:
+            logger.warning(f"Failed to parse marking response: {e}")
+        
+        # Fallback
+        is_correct = student_answer.lower().strip() in correct_answer.lower()
+        return {
+            "is_correct": is_correct,
+            "marks_earned": total_marks if is_correct else 0,
+            "feedback": "Great job! ✨" if is_correct else "Not quite, but good try! 💪",
+            "explanation": correct_answer,
+            "encouragement": "Keep practicing!"
+        }
+    
+    # ==================== Topic Summary ====================
+    
+    async def get_topic_summary(
+        self,
+        topic: str,
+        student_context: Dict[str, Any]
+    ) -> str:
+        """Get a concise summary of a topic"""
+        response, _ = await self.query(
+            question=f"Give me a clear, exam-focused summary of {topic}",
+            student_context=student_context,
+            mode="summary"
+        )
+        return response
+    
+    # ==================== Internal Methods ====================
+    
+    def _build_student_context(self, ctx: Dict[str, Any]) -> StudentContext:
+        """Convert dict to StudentContext object"""
+        return StudentContext(
+            education_level=ctx.get("education_level", "secondary"),
+            grade=ctx.get("grade", "Form 3"),
+            subject=ctx.get("current_subject") or ctx.get("subject"),
+            language=ctx.get("preferred_language", "English"),
+            difficulty_preference=ctx.get("difficulty", "medium")
+        )
+    
+    def _build_prompt_context(
+        self,
+        student_ctx: Dict[str, Any],
+        mode: ResponseMode
+    ) -> PromptContext:
+        """Build PromptContext from student context"""
+        return PromptContext(
+            student_name=student_ctx.get("first_name", "Student"),
+            education_level=student_ctx.get("education_level", "secondary"),
+            grade=student_ctx.get("grade", "Form 3"),
+            subject=student_ctx.get("current_subject") or student_ctx.get("subject", "General"),
+            language=student_ctx.get("preferred_language", "English"),
+        )
+    
+    async def _generate_response(
+        self,
+        prompt: str,
+        settings: GenerationSettings
+    ) -> str:
+        """Generate response using Gemini"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=settings.temperature,
+                        top_p=settings.top_p,
+                        top_k=settings.top_k,
+                        max_output_tokens=settings.max_output_tokens
+                    ),
+                    safety_settings={
+                        'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+                        'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+                        'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                        'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                    }
+                )
+            )
+            return response.text
+        except Exception as e:
+            logger.error(f"Generation failed: {e}")
+            self._stats["errors"] += 1
+            return self._get_fallback_response()
+    
+    def _post_process_response(self, response: str, mode: ResponseMode) -> str:
+        """Clean and format the response"""
+        if not response:
+            return self._get_fallback_response()
+        
+        response = response.strip()
+        
+        # Ensure response fits WhatsApp limits for most modes
+        if mode != ResponseMode.EXPLAIN and len(response) > 1500:
+            # Find a good breaking point
+            break_point = response.rfind('.', 0, 1400)
+            if break_point > 1000:
+                response = response[:break_point + 1]
+                response += "\n\n(Let me know if you'd like me to continue! 😊)"
+        
+        return response
+    
+    def _calculate_confidence(self, docs: List[SearchResult]) -> float:
+        """Calculate confidence score based on retrieval quality"""
+        if not docs:
+            return 0.3
+        
+        scores = [d.combined_score for d in docs[:3]]
+        if not scores:
+            return 0.4
+        
+        avg_score = sum(scores) / len(scores)
+        top_score = max(scores)
+        
+        confidence = (top_score * 0.6) + (avg_score * 0.4)
+        
+        # Boost if multiple good results
+        good_results = len([s for s in scores if s > 0.5])
+        if good_results >= 2:
+            confidence = min(confidence + 0.1, 1.0)
+        
+        return round(confidence, 2)
+    
+    def _parse_question_json(
+        self,
+        response: str,
+        topic: str,
+        difficulty: str
+    ) -> Dict[str, Any]:
         """Parse and validate question JSON from response"""
         try:
-            # Clean up response
+            # Remove markdown code blocks
             response = response.strip()
-            
-            # Remove markdown code blocks if present
             if response.startswith("```"):
                 lines = response.split("\n")
-                # Find content between ``` markers
-                start_idx = 1 if lines[0].startswith("```") else 0
-                end_idx = len(lines)
+                start = 1 if lines[0].startswith("```") else 0
+                end = len(lines)
                 for i in range(len(lines) - 1, -1, -1):
                     if lines[i].strip() == "```":
-                        end_idx = i
+                        end = i
                         break
-                response = "\n".join(lines[start_idx:end_idx])
+                response = "\n".join(lines[start:end])
             
-            # Try to parse JSON
             question_data = json.loads(response)
             
             # Validate required fields
-            required = ["question", "correct_answer"]
-            for field in required:
-                if field not in question_data:
-                    raise ValueError(f"Missing required field: {field}")
+            if "question" not in question_data:
+                raise ValueError("Missing question field")
             
-            # Add defaults for optional fields
+            # Add defaults
             question_data.setdefault("question_type", "short_answer")
+            question_data.setdefault("correct_answer", "")
             question_data.setdefault("hint", "Think about the key concepts.")
-            question_data.setdefault("explanation", "Review the topic material for more details.")
+            question_data.setdefault("explanation", "Review the topic material.")
             question_data.setdefault("topic", topic)
             question_data.setdefault("difficulty", difficulty)
+            question_data.setdefault("marks", 4)
             
             return question_data
             
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse question JSON: {e}")
-            # Return a default structure
             return {
-                "question": response if len(response) < 500 else "Please try generating another question.",
+                "question": response[:500] if len(response) < 500 else "Please try generating another question.",
                 "question_type": "short_answer",
-                "correct_answer": "Please check with your teacher.",
+                "correct_answer": "",
                 "hint": "Think about the key concepts.",
                 "explanation": "Review the topic material.",
                 "topic": topic,
@@ -635,62 +704,77 @@ Return ONLY valid JSON, no other text or markdown."""
                 "parse_error": True
             }
     
-    # ==================== Additional Helper Methods ====================
+    def _get_default_topics(self, subject: str) -> List[str]:
+        """Get default topics for a subject"""
+        defaults = {
+            "mathematics": ["algebra", "geometry", "trigonometry", "statistics"],
+            "physics": ["mechanics", "electricity", "waves", "energy"],
+            "chemistry": ["atoms", "reactions", "acids and bases", "organic chemistry"],
+            "biology": ["cells", "photosynthesis", "genetics", "ecology"],
+            "english": ["comprehension", "grammar", "essay writing", "vocabulary"],
+        }
+        return defaults.get(subject.lower(), ["general concepts"])
     
-    async def get_topic_summary(
-        self,
-        topic: str,
-        student_context: Dict[str, Any]
-    ) -> str:
-        """Get a summary of a specific topic"""
-        response, _ = await self.query(
-            question=f"Give me a summary of {topic}",
-            student_context=student_context,
-            mode="summary"
+    def _get_fallback_response(self) -> str:
+        """Get a friendly fallback response"""
+        return (
+            "I'm having a small hiccup right now 🙈 "
+            "Could you try asking your question again? "
+            "I'm here to help you learn!"
         )
-        return response
     
-    async def check_answer(
-        self,
-        question: str,
-        student_answer: str,
-        correct_answer: str,
-        student_context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Check a student's answer and provide feedback"""
-        name = student_context.get('first_name', 'there')
+    # ==================== Utility Methods ====================
+    
+    @property
+    def stats(self) -> Dict[str, Any]:
+        """Get engine statistics"""
+        return {
+            **self._stats,
+            "embedding_stats": self._embedding_service.stats,
+            "avg_retrieval_ms": (
+                self._stats["total_retrieval_time_ms"] / 
+                max(self._stats["queries_processed"], 1)
+            ),
+            "avg_generation_ms": (
+                self._stats["total_generation_time_ms"] / 
+                max(self._stats["queries_processed"], 1)
+            ),
+        }
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Comprehensive health check"""
+        result = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "components": {}
+        }
         
-        prompt = f"""A student named {name} answered a question. Evaluate their answer and provide encouraging feedback.
-
-Question: {question}
-Student's Answer: {student_answer}
-Correct Answer: {correct_answer}
-
-Provide feedback in this JSON format:
-{{
-    "is_correct": true/false,
-    "feedback": "Encouraging feedback message",
-    "explanation": "Brief explanation of the correct answer",
-    "encouragement": "A motivating message"
-}}
-
-Return only valid JSON."""
-
-        response = await self._generate_response(prompt, ResponseMode.PRACTICE)
-        
+        # Check vector store
         try:
-            response = response.strip()
-            if response.startswith("```"):
-                response = response.split("```")[1]
-                if response.startswith("json"):
-                    response = response[4:]
-            return json.loads(response)
-        except:
-            # Simple fallback comparison
-            is_correct = student_answer.lower().strip() in correct_answer.lower()
-            return {
-                "is_correct": is_correct,
-                "feedback": f"{'Great job! ✨' if is_correct else 'Not quite, but good try! 💪'}",
-                "explanation": correct_answer,
-                "encouragement": "Keep practicing!"
+            vs_health = await self._vector_store.health_check()
+            result["components"]["vector_store"] = vs_health
+        except Exception as e:
+            result["status"] = "degraded"
+            result["components"]["vector_store"] = {"status": "error", "error": str(e)}
+        
+        # Check LLM
+        try:
+            test_response = await self._generate_response(
+                "Say 'OK'",
+                GenerationSettings(temperature=0, max_output_tokens=10)
+            )
+            result["components"]["llm"] = {
+                "status": "healthy" if test_response else "degraded"
             }
+        except Exception as e:
+            result["status"] = "degraded"
+            result["components"]["llm"] = {"status": "error", "error": str(e)}
+        
+        result["stats"] = self.stats
+        return result
+    
+    async def close(self) -> None:
+        """Clean up resources"""
+        if self._vector_store:
+            await self._vector_store.close()
+        logger.info("RAG Engine closed")
