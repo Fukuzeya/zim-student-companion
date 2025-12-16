@@ -188,37 +188,57 @@ jobs:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
           IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
-          # Pass the variables needed for the remote script here:
           GITHUB_REPO: ${{ github.repository }}
-          # The token MUST be passed as an environment variable in this outer block
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          # --- REMOVED SINGLE QUOTE HERE ---
+          # --- NO SINGLE QUOTE HERE ---
           ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
             set -xe 
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
-            # Now, the local runner expands $GITHUB_TOKEN before sending it over.
-            # The remote shell receives the actual token string.
+            # Use the environment variable expanded by the local runner
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # Use the local runner's actor name (Fukuzeya)
-            ACTOR_NAME=${{ github.actor }}
+            # --- CRITICAL FIX START ---
             
-            # Extract the first tag from the comma-separated list
-            DEPLOY_TAG=$(echo "$IMAGE_TAGS" | cut -d',' -f1)
+            # The IMAGE_TAGS variable contains: ghcr.io/fukuzeya/zim-student-companion:commit-b643703,ghcr.io/fukuzeya/zim-student-companion:latest
+            # 1. Use 'tr' to replace commas/spaces with a newline.
+            # 2. Use 'head -n 1' to grab only the first line/tag (the commit hash tag).
+            DEPLOY_TAG=$(echo "$IMAGE_TAGS" | tr ',' '\n' | head -n 1)
 
-            echo "📥 Pulling image: ghcr.io/$GITHUB_REPO:$DEPLOY_TAG"
+            # Ensure we remove any possible leading/trailing whitespace
+            DEPLOY_TAG=$(echo $DEPLOY_TAG | xargs)
+
+            # 3. Define the full image name for the pull command
+            FULL_IMAGE_NAME="$DEPLOY_TAG"
+            
+            echo "📥 Pulling image: $FULL_IMAGE_NAME"
             
             # 1. Pull the specific image
-            docker pull ghcr.io/$GITHUB_REPO:$DEPLOY_TAG
+            docker pull "$FULL_IMAGE_NAME"
             
-            # 2. Export variables for docker-compose to use during 'up'
-            # We use the clean, derived variables
+            # --- CRITICAL FIX END ---
+            
+            # 2. Export the simple tag (e.g., commit-b643703) for docker-compose.prod.yml
+            # We must strip the registry/repo part to get just the tag used in docker-compose.
+            # The docker/metadata-action output contains the full image name, but docker-compose.prod.yml 
+            # likely only expects the 'commit-...' part if you followed the original structure.
+
+            # Get the part after the last colon (the tag itself, e.g., commit-b643703)
+            # This is complex, let's simplify based on your docker-compose.prod.yml:
+
+            # Since your image line is: image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
+            # The value of DEPLOY_TAG should be the full string 'commit-b643703'.
+
+            # Re-calculating the simple tag (assuming DEPLOY_TAG is the full tag string from pull)
+            # Example: DEPLOY_TAG='ghcr.io/fukuzeya/zim-student-companion:commit-b643703'
+            # We want IMAGE_TAG='commit-b643703'
+            SIMPLE_TAG=$(echo $DEPLOY_TAG | awk -F: '{print $NF}')
+
             export GITHUB_REPOSITORY=$GITHUB_REPO
-            export IMAGE_TAG=$DEPLOY_TAG
+            export IMAGE_TAG=$SIMPLE_TAG
             
             echo "🔄 Updating services with tag: $IMAGE_TAG"
             
