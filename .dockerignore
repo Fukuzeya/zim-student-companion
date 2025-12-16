@@ -1,0 +1,26 @@
+# Ignore git history to reduce image size
+.git
+.gitignore
+
+# Ignore local environment secrets (CRITICAL SECURITY STEP)
+.env
+.env.*
+
+# Ignore Python cache and virtual environments
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Ignore testing and coverage reports
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
