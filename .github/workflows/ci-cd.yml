@@ -187,20 +187,25 @@ jobs:
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          # We grab the tag output from the build job (e.g., commit-abc,latest)
           IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
+          # Pass the variables needed for the remote script here:
           GITHUB_REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The token MUST be passed as an environment variable in this outer block
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'ENDSSH'
-            # CRITICAL DEBUGGING STEP: Print commands and their arguments as they execute
+          # --- REMOVED SINGLE QUOTE HERE ---
+          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
             set -xe 
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
-            # Pass the token directly from the local GitHub Action environment
-            echo "${GITHUB_TOKEN}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Now, the local runner expands $GITHUB_TOKEN before sending it over.
+            # The remote shell receives the actual token string.
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Use the local runner's actor name (Fukuzeya)
+            ACTOR_NAME=${{ github.actor }}
             
             # Extract the first tag from the comma-separated list
             DEPLOY_TAG=$(echo "$IMAGE_TAGS" | cut -d',' -f1)
@@ -211,12 +216,9 @@ jobs:
             docker pull ghcr.io/$GITHUB_REPO:$DEPLOY_TAG
             
             # 2. Export variables for docker-compose to use during 'up'
-            # Use printf for clean, reliable variable assignment
-            printf "export GITHUB_REPOSITORY='%s'\n" "$GITHUB_REPO" >> .env.runtime
-            printf "export IMAGE_TAG='%s'\n" "$DEPLOY_TAG" >> .env.runtime
-            
-            # 3. Source the runtime variables before running docker-compose
-            source .env.runtime
+            # We use the clean, derived variables
+            export GITHUB_REPOSITORY=$GITHUB_REPO
+            export IMAGE_TAG=$DEPLOY_TAG
             
             echo "🔄 Updating services with tag: $IMAGE_TAG"
             
