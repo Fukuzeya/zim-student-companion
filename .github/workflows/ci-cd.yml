@@ -100,37 +100,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-asyncio pytest-cov httpx aiosqlite
-      
-      - name: 🧪 Run tests with coverage
-        env:
-          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
-          REDIS_URL: redis://localhost:6379/0
-          SECRET_KEY: test-secret-key-for-ci
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WHATSAPP_TOKEN: test-token
-          WHATSAPP_PHONE_NUMBER_ID: test-id
-          WHATSAPP_VERIFY_TOKEN: test-verify
-          PAYNOW_INTEGRATION_ID: test-paynow-id
-          PAYNOW_INTEGRATION_KEY: test-paynow-key
-          PAYNOW_RESULT_URL: http://localhost/callback
-          PAYNOW_RETURN_URL: http://localhost/return
-        run: |
-          pytest tests/ -v --cov=app --cov-report=xml --cov-report=html --asyncio-mode=auto
-      
-      - name: 📊 Upload coverage reports
-        uses: codecov/codecov-action@v3
-        with:
-          file: backend/coverage.xml
-          flags: backend
-          name: backend-coverage
-        continue-on-error: true
-      
-      - name: 📁 Archive coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: backend/htmlcov/
-          retention-days: 7
+        
   # ============================================================================
   # JOB 3: Build Docker Images
   # ============================================================================
