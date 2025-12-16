@@ -187,37 +187,43 @@ jobs:
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          # Passes the comma-separated tag string (e.g., ghcr.io/repo:commit-123,ghcr.io/repo:latest)
           IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
           GITHUB_REPO: ${{ github.repository }}
-          # The token MUST be passed as an environment variable for the remote script
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
           ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
-            # set -xe: Prints commands before execution (x) and exits on error (e).
-            # Keep this line active until deployment is 100% verified to succeed.
             set -xe 
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
-            # Uses the token provided by the local runner environment
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # --- ROBUST TAG PARSING ---
-            # 1. Extract the full string of the first tag (the commit hash tag)
-            # ${VAR%%pattern}: Deletes the longest match of 'pattern' from the end of VAR.
-            # This isolates the first tag string before the comma.
-            FULL_IMAGE_NAME="${IMAGE_TAGS%%,*}"
+            # --- FINAL ROBUST TAG PARSING FIX ---
             
-            # 2. Extract the simple tag (e.g., 'commit-b643703') for docker-compose.prod.yml
-            # ${VAR##pattern}: Deletes the longest match of 'pattern' from the front of VAR.
-            # This extracts the tag part after the last colon.
+            # 1. Clean the input string: Remove all newlines, tabs, and commas,
+            #    and replace with a single space to separate the two tags.
+            CLEAN_TAGS=$(echo "$IMAGE_TAGS" | tr -d '\n\t' | tr ',' ' ')
+            
+            # 2. Extract the first tag string only (the unique commit tag).
+            # We use 'set' to assign the separate words to variables, and use the second one.
+            # Example: CLEAN_TAGS="ghcr.io/repo:latest ghcr.io/repo:commit-123"
+            set -- $CLEAN_TAGS
+            
+            # $2 will now contain the second word, which is typically the commit-specific tag.
+            FULL_IMAGE_NAME="$2" 
+            
+            # If for some reason $2 is empty (only one tag exists), use $1 as fallback
+            if [ -z "$FULL_IMAGE_NAME" ]; then
+                FULL_IMAGE_NAME="$1"
+            fi
+            
+            # 3. Extract the simple tag (e.g., 'commit-ae20439') for docker-compose.prod.yml
             SIMPLE_TAG="${FULL_IMAGE_NAME##*:}"
-
+            
             echo "📥 Pulling image: $FULL_IMAGE_NAME"
             
-            # 1. Pull the specific image using the derived tag
+            # 4. Pull the specific image
             docker pull "$FULL_IMAGE_NAME"
             
             # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
