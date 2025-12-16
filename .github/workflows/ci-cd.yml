@@ -187,56 +187,40 @@ jobs:
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
+          # Passes the comma-separated tag string (e.g., ghcr.io/repo:commit-123,ghcr.io/repo:latest)
           IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
           GITHUB_REPO: ${{ github.repository }}
+          # The token MUST be passed as an environment variable for the remote script
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          # --- NO SINGLE QUOTE HERE ---
           ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
+            # set -xe: Prints commands before execution (x) and exits on error (e).
+            # Keep this line active until deployment is 100% verified to succeed.
             set -xe 
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
-            # Use the environment variable expanded by the local runner
+            # Uses the token provided by the local runner environment
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # --- CRITICAL FIX START ---
+            # --- ROBUST TAG PARSING ---
+            # 1. Extract the full string of the first tag (the commit hash tag)
+            # ${VAR%%pattern}: Deletes the longest match of 'pattern' from the end of VAR.
+            # This isolates the first tag string before the comma.
+            FULL_IMAGE_NAME="${IMAGE_TAGS%%,*}"
             
-            # The IMAGE_TAGS variable contains: ghcr.io/fukuzeya/zim-student-companion:commit-b643703,ghcr.io/fukuzeya/zim-student-companion:latest
-            # 1. Use 'tr' to replace commas/spaces with a newline.
-            # 2. Use 'head -n 1' to grab only the first line/tag (the commit hash tag).
-            DEPLOY_TAG=$(echo "$IMAGE_TAGS" | tr ',' '\n' | head -n 1)
+            # 2. Extract the simple tag (e.g., 'commit-b643703') for docker-compose.prod.yml
+            # ${VAR##pattern}: Deletes the longest match of 'pattern' from the front of VAR.
+            # This extracts the tag part after the last colon.
+            SIMPLE_TAG="${FULL_IMAGE_NAME##*:}"
 
-            # Ensure we remove any possible leading/trailing whitespace
-            DEPLOY_TAG=$(echo $DEPLOY_TAG | xargs)
-
-            # 3. Define the full image name for the pull command
-            FULL_IMAGE_NAME="$DEPLOY_TAG"
-            
             echo "📥 Pulling image: $FULL_IMAGE_NAME"
             
-            # 1. Pull the specific image
+            # 1. Pull the specific image using the derived tag
             docker pull "$FULL_IMAGE_NAME"
             
-            # --- CRITICAL FIX END ---
-            
-            # 2. Export the simple tag (e.g., commit-b643703) for docker-compose.prod.yml
-            # We must strip the registry/repo part to get just the tag used in docker-compose.
-            # The docker/metadata-action output contains the full image name, but docker-compose.prod.yml 
-            # likely only expects the 'commit-...' part if you followed the original structure.
-
-            # Get the part after the last colon (the tag itself, e.g., commit-b643703)
-            # This is complex, let's simplify based on your docker-compose.prod.yml:
-
-            # Since your image line is: image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
-            # The value of DEPLOY_TAG should be the full string 'commit-b643703'.
-
-            # Re-calculating the simple tag (assuming DEPLOY_TAG is the full tag string from pull)
-            # Example: DEPLOY_TAG='ghcr.io/fukuzeya/zim-student-companion:commit-b643703'
-            # We want IMAGE_TAG='commit-b643703'
-            SIMPLE_TAG=$(echo $DEPLOY_TAG | awk -F: '{print $NF}')
-
+            # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
             export GITHUB_REPOSITORY=$GITHUB_REPO
             export IMAGE_TAG=$SIMPLE_TAG
             
