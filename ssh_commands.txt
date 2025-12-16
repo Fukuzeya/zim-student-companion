@@ -1,3 +1,0 @@
-ssh-keygen -t rsa -b 4096 -C "ci-cd" -f ~/.ssh/ci-cd
-ssh-copy-id -i ~/.ssh/ci-cd.pub root@172.237.103.250
-ssh -i /c/Users/hp/.ssh/ci-cd 'root@172.237.103.250'
