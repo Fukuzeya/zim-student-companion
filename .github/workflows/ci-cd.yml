@@ -192,36 +192,39 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH
-            set -e # Stop script if any command fails
+          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'ENDSSH'
+            # CRITICAL DEBUGGING STEP: Print commands and their arguments as they execute
+            set -xe 
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Pass the token directly from the local GitHub Action environment
+            echo "${GITHUB_TOKEN}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # Extract the first tag from the comma-separated list for the PULL command
-            # The 'latest' tag is usually the second one, so we want the commit tag first.
-            # We can use AWK or cut to grab the first tag:
+            # Extract the first tag from the comma-separated list
             DEPLOY_TAG=$(echo "$IMAGE_TAGS" | cut -d',' -f1)
 
             echo "📥 Pulling image: ghcr.io/$GITHUB_REPO:$DEPLOY_TAG"
             
-            # 1. Pull the specific image using the tag we just extracted.
-            # We specify the image name and tag explicitly here to ensure it works.
+            # 1. Pull the specific image
             docker pull ghcr.io/$GITHUB_REPO:$DEPLOY_TAG
             
             # 2. Export variables for docker-compose to use during 'up'
-            export GITHUB_REPOSITORY=$GITHUB_REPO
-            # Use the single, derived DEPLOY_TAG for the IMAGE_TAG variable 
-            # that is referenced in docker-compose.prod.yml
-            export IMAGE_TAG=$DEPLOY_TAG
+            # Use printf for clean, reliable variable assignment
+            printf "export GITHUB_REPOSITORY='%s'\n" "$GITHUB_REPO" >> .env.runtime
+            printf "export IMAGE_TAG='%s'\n" "$DEPLOY_TAG" >> .env.runtime
             
-            echo "🔄 Updating services..."
+            # 3. Source the runtime variables before running docker-compose
+            source .env.runtime
+            
+            echo "🔄 Updating services with tag: $IMAGE_TAG"
+            
             # 'up -d' will recreate containers if the image changed
-            # The image service in docker-compose will now correctly use the exported IMAGE_TAG
             docker-compose -f docker-compose.prod.yml up -d --remove-orphans
             
             echo "🧹 Cleaning up old images..."
             docker image prune -af --filter "until=24h"
+            
+            echo "Deployment finished."
           ENDSSH
