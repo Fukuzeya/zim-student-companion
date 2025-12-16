@@ -192,7 +192,12 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no \
+            GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            IMAGE_TAGS="${IMAGE_TAGS}" \
+            GITHUB_REPO="${GITHUB_REPO}" \
+            $USER@$HOST << 'ENDSSH'
+            
             set -euo pipefail
             set -x
 
@@ -202,23 +207,18 @@ jobs:
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_REPO%%/*}" --password-stdin
 
             # ============================================================
-            # Normalize and select Docker image tag (robust & safe)
+            # Normalize and select Docker image tag
             # ============================================================
 
-            # Convert newlines/commas/tabs into spaces
             CLEAN_TAGS=$(echo "$IMAGE_TAGS" | tr '\n\t,' '   ')
-
-            # Split into positional args
             set -- $CLEAN_TAGS
 
-            # Prefer commit-specific tag, fallback to first
             if [ -n "${2:-}" ]; then
               FULL_IMAGE_NAME="$2"
             elif [ -n "${1:-}" ]; then
               FULL_IMAGE_NAME="$1"
             else
               echo "❌ ERROR: No Docker image tags found"
-              echo "IMAGE_TAGS=$IMAGE_TAGS"
               exit 1
             fi
 
@@ -228,17 +228,18 @@ jobs:
             docker pull "$FULL_IMAGE_NAME"
 
             # ============================================================
-            # Export variables for docker-compose
+            # Deploy
             # ============================================================
+
             export GITHUB_REPOSITORY="$GITHUB_REPO"
             export IMAGE_TAG="$SIMPLE_TAG"
 
             echo "🔄 Deploying with tag: $IMAGE_TAG"
-
             docker-compose -f docker-compose.prod.yml up -d --remove-orphans
 
-            echo "🧹 Cleaning up old images..."
+            echo "🧹 Cleaning old images..."
             docker image prune -af --filter "until=24h"
 
             echo "✅ Deployment completed successfully"
           ENDSSH
+
