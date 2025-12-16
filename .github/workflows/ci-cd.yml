@@ -187,8 +187,8 @@ jobs:
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          # We grab the tag output from the build job
-          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          # We grab the tag output from the build job (e.g., commit-abc,latest)
+          IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -200,16 +200,26 @@ jobs:
             echo "🔐 Logging into Registry..."
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            echo "📥 Pulling image: $IMAGE_TAG"
-            # We export variables so docker-compose can see them
-            export GITHUB_REPOSITORY=$GITHUB_REPO
-            export IMAGE_TAG=$IMAGE_TAG
+            # Extract the first tag from the comma-separated list for the PULL command
+            # The 'latest' tag is usually the second one, so we want the commit tag first.
+            # We can use AWK or cut to grab the first tag:
+            DEPLOY_TAG=$(echo "$IMAGE_TAGS" | cut -d',' -f1)
+
+            echo "📥 Pulling image: ghcr.io/$GITHUB_REPO:$DEPLOY_TAG"
             
-            # Pull the specific image we just built
-            docker-compose -f docker-compose.prod.yml pull
+            # 1. Pull the specific image using the tag we just extracted.
+            # We specify the image name and tag explicitly here to ensure it works.
+            docker pull ghcr.io/$GITHUB_REPO:$DEPLOY_TAG
+            
+            # 2. Export variables for docker-compose to use during 'up'
+            export GITHUB_REPOSITORY=$GITHUB_REPO
+            # Use the single, derived DEPLOY_TAG for the IMAGE_TAG variable 
+            # that is referenced in docker-compose.prod.yml
+            export IMAGE_TAG=$DEPLOY_TAG
             
             echo "🔄 Updating services..."
             # 'up -d' will recreate containers if the image changed
+            # The image service in docker-compose will now correctly use the exported IMAGE_TAG
             docker-compose -f docker-compose.prod.yml up -d --remove-orphans
             
             echo "🧹 Cleaning up old images..."
