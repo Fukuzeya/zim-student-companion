@@ -182,6 +182,7 @@ jobs:
           # Copy Nginx config
           scp -o StrictHostKeyChecking=no nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
 
+
       # 3. Execute Remote Deployment Commands
       - name: 🚀 Execute Deployment on Server
         env:
@@ -189,54 +190,55 @@ jobs:
           USER: ${{ secrets.LINODE_USER }}
           IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
           GITHUB_REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
-            set -xe 
-            
+          ssh -o StrictHostKeyChecking=no $USER@$HOST << 'ENDSSH'
+            set -euo pipefail
+            set -x
+
             cd /opt/zim-student-companion
-            
-            echo "🔐 Logging into Registry..."
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            
-            # --- FINAL ROBUST TAG PARSING FIX ---
-            
-            # 1. Clean the input string: Remove all newlines, tabs, and commas,
-            #    and replace with a single space to separate the two tags.
-            CLEAN_TAGS=$(echo "$IMAGE_TAGS" | tr -d '\n\t' | tr ',' ' ')
-            
-            # 2. Extract the first tag string only (the unique commit tag).
-            # We use 'set' to assign the separate words to variables, and use the second one.
-            # Example: CLEAN_TAGS="ghcr.io/repo:latest ghcr.io/repo:commit-123"
+
+            echo "🔐 Logging into GitHub Container Registry..."
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_REPO%%/*}" --password-stdin
+
+            # ============================================================
+            # Normalize and select Docker image tag (robust & safe)
+            # ============================================================
+
+            # Convert newlines/commas/tabs into spaces
+            CLEAN_TAGS=$(echo "$IMAGE_TAGS" | tr '\n\t,' '   ')
+
+            # Split into positional args
             set -- $CLEAN_TAGS
-            
-            # $2 will now contain the second word, which is typically the commit-specific tag.
-            FULL_IMAGE_NAME="$2" 
-            
-            # If for some reason $2 is empty (only one tag exists), use $1 as fallback
-            if [ -z "$FULL_IMAGE_NAME" ]; then
-                FULL_IMAGE_NAME="$1"
+
+            # Prefer commit-specific tag, fallback to first
+            if [ -n "${2:-}" ]; then
+              FULL_IMAGE_NAME="$2"
+            elif [ -n "${1:-}" ]; then
+              FULL_IMAGE_NAME="$1"
+            else
+              echo "❌ ERROR: No Docker image tags found"
+              echo "IMAGE_TAGS=$IMAGE_TAGS"
+              exit 1
             fi
-            
-            # 3. Extract the simple tag (e.g., 'commit-ae20439') for docker-compose.prod.yml
+
             SIMPLE_TAG="${FULL_IMAGE_NAME##*:}"
-            
+
             echo "📥 Pulling image: $FULL_IMAGE_NAME"
-            
-            # 4. Pull the specific image
             docker pull "$FULL_IMAGE_NAME"
-            
-            # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
-            export GITHUB_REPOSITORY=$GITHUB_REPO
-            export IMAGE_TAG=$SIMPLE_TAG
-            
-            echo "🔄 Updating services with tag: $IMAGE_TAG"
-            
-            # 'up -d' will recreate containers if the image changed
+
+            # ============================================================
+            # Export variables for docker-compose
+            # ============================================================
+            export GITHUB_REPOSITORY="$GITHUB_REPO"
+            export IMAGE_TAG="$SIMPLE_TAG"
+
+            echo "🔄 Deploying with tag: $IMAGE_TAG"
+
             docker-compose -f docker-compose.prod.yml up -d --remove-orphans
-            
+
             echo "🧹 Cleaning up old images..."
             docker image prune -af --filter "until=24h"
-            
-            echo "Deployment finished."
+
+            echo "✅ Deployment completed successfully"
           ENDSSH
