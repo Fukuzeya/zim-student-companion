@@ -77,7 +77,7 @@ services:
   # 5. Qdrant Vector Database
   # ----------------------------------------
   qdrant:
-    image: qdrant/qdrant:v1.10.1
+    image: qdrant/qdrant:v1.16.1
     restart: unless-stopped
     environment:
       QDRANT__STORAGE__WRITE_CONCURRENCY: 4
