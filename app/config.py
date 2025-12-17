@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     WHATSAPP_PHONE_NUMBER_ID: str = ""
     WHATSAPP_VERIFY_TOKEN: str = "dev-verify-token"
     WHATSAPP_API_URL: str = "https://graph.facebook.com/v18.0"
-    WHATSAPP_BUSINESS_ACCOUNT_ID: str = Field(..., env="WHATSAPP_BUSINESS_ACCOUNT_ID")
+    WHATSAPP_BUSINESS_ACCOUNT_ID: Optional[str] = Field(..., env="WHATSAPP_BUSINESS_ACCOUNT_ID")
     
     # Paynow - Optional with empty defaults
     PAYNOW_INTEGRATION_ID: str = ""
