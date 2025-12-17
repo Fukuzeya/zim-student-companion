@@ -1,0 +1,9 @@
+docker compose -f docker-compose.prod.yml down
+
+export GITHUB_REPOSITORY="fukuzeya/zim-student-companion"
+export IMAGE_TAG="commit-5856962"  # This is the latest tag from your logs
+
+docker compose -f docker-compose.prod.yml up -d
+
+docker compose -f docker-compose.prod.yml ps
+
