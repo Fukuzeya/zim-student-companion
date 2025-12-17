@@ -1,145 +1,133 @@
-version: '3.8'
+# ============================================================================
+# docker-compose.prod.yml - Production Setup
+# ============================================================================
 
 services:
-  # ==========================================================================
-  # API Service
-  # ==========================================================================
+
+  # ----------------------------------------
+  # 1. FastAPI Backend (The Application)
+  # ----------------------------------------
   api:
-    # We pull the image dynamically based on the GITHUB_REPOSITORY and IMAGE_TAG
-    # variables passed during the deployment script.
     image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
-    container_name: zsc-api
-    restart: always
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     
-    # CRITICAL: This line tells Docker to read secrets from a file named '.env'
-    # located in the same directory on the server.
-    env_file:
-      - .env
-    
-    # We map specific environment variables explicitly to ensure they pass through
-    # properly from the file to the container.
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Pass internal connection URLs and variables defined in the .env file
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-    
+      - SECRET_KEY=${SECRET_KEY}
+      # Add any other production environment variables here
+      
+    expose:
+      # Expose port 8000 ONLY to the internal Docker network
+      - 8000
+      
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    
-    networks:
-      - zsc-network
-    
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      - postgres
+      - redis
+      - qdrant # <-- NEW DEPENDENCY
+      - celery_worker
+      
+  # ----------------------------------------
+  # 2. Reverse Proxy (Public Gateway)
+  # ----------------------------------------
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      # Mount the custom Nginx config file
+      - ./nginx/nginx.prod.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      # Map public port 80 to the container's port 80
+      - "80:80"
+      # If using SSL/TLS, uncomment port 443
+      # - "443:443"
+    depends_on:
+      - api # Nginx must wait for the API service to start
 
-  # ==========================================================================
-  # PostgreSQL Database
-  # ==========================================================================
+  # ----------------------------------------
+  # 3. PostgreSQL Database
+  # ----------------------------------------
   postgres:
     image: postgres:15-alpine
-    container_name: zsc-postgres
-    restart: always
-    # Read the same .env file to get the master credentials
-    env_file:
-      - .env
+    restart: unless-stopped
+    environment:
+      # Database variables should be sourced from the .env file
+      POSTGRES_USER=${POSTGRES_USER}
+      POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      POSTGRES_DB=${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backups:/backups
-    networks:
-      - zsc-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ==========================================================================
-  # Redis
-  # ==========================================================================
+  # ----------------------------------------
+  # 4. Redis Cache/Broker
+  # ----------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: zsc-redis
-    restart: always
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
     volumes:
       - redis_data:/data
-    networks:
-      - zsc-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ==========================================================================
-  # Celery Worker
-  # ==========================================================================
-  celery-worker:
-    # Uses the same image as API
-    image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
-    container_name: zsc-celery-worker
-    restart: always
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
-    env_file:
-      - .env
+  # ----------------------------------------
+  # 5. Qdrant Vector Database
+  # ----------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.10.1 # Pin to a stable version
+    restart: unless-stopped
+    # Use environment variables for performance tuning and internal networking
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      QDRANT__STORAGE__WRITE_CONCURRENCY: 4
+      QDRANT__STORAGE__MAX_SEARCH_THREADS: 8
+      QDRANT__SERVICE__HOST: 0.0.0.0 # Listen on all internal interfaces
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:6333/qdrant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      
+  # ----------------------------------------
+  # 6. Celery Worker (Asynchronous Tasks)
+  # ----------------------------------------
+  celery_worker:
+    image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       - postgres
       - redis
-    networks:
-      - zsc-network
+    command: celery -A app.tasks.celery_app worker --loglevel=info
 
-  # ==========================================================================
-  # Celery Beat (Scheduler)
-  # ==========================================================================
-  celery-beat:
+  # ----------------------------------------
+  # 7. Celery Beat (Scheduler)
+  # ----------------------------------------
+  celery_beat:
     image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
-    container_name: zsc-celery-beat
-    restart: always
-    command: celery -A app.tasks.celery_app beat --loglevel=info
-    env_file:
-      - .env
+    restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
+      - postgres
       - redis
-    networks:
-      - zsc-network
-
-  # ==========================================================================
-  # Nginx Reverse Proxy
-  # ==========================================================================
-  nginx:
-    image: nginx:alpine
-    container_name: zsc-nginx
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - api
-    networks:
-      - zsc-network
+    command: celery -A app.tasks.celery_app beat --loglevel=info
 
 volumes:
   postgres_data:
   redis_data:
-  qdrant_data:
-
-networks:
-  zsc-network:
-    driver: bridge
+  qdrant_data: # <-- New persistent volume for vector data
