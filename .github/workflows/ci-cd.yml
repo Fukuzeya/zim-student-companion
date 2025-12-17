@@ -182,46 +182,60 @@ jobs:
           # Copy Nginx config
           scp -o StrictHostKeyChecking=no nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
 
-      # 3. Execute Remote Deployment Commands
+      # --- NEW STEP: Pre-process Tags Locally ---
+      - name: 🧼 Clean and Prepare Tag Variable
+        id: prepare_tag
+        shell: bash
+        # Input tag string from the build job
+        env:
+          INPUT_TAGS: ${{ needs.build.outputs.image_tag }}
+        run: |
+          # The input is like: 'ghcr.io/repo:commit-123,ghcr.io/repo:latest'
+          # Use sed to remove the comma and everything after it.
+          CLEAN_TAG=$(echo "$INPUT_TAGS" | sed 's/,.*//')
+          
+          echo "Clean Tag found: $CLEAN_TAG"
+          # Set the cleaned tag as an output variable for the next step to use
+          echo "CLEAN_TAG=$CLEAN_TAG" >> $GITHUB_OUTPUT
+
       - name: 🚀 Execute Deployment on Server
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          # We grab the tag output from the build job (e.g., commit-abc,latest)
-          IMAGE_TAGS: ${{ needs.build.outputs.image_tag }}
+          # Use the cleaned variable from the previous step
+          FULL_IMAGE_NAME: ${{ steps.prepare_tag.outputs.CLEAN_TAG }}
           GITHUB_REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH
-            set -e # Stop script if any command fails
+          # We no longer need set -xe, but we keep set -e for safety
+          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
+            set -e
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # Extract the first tag from the comma-separated list for the PULL command
-            # The 'latest' tag is usually the second one, so we want the commit tag first.
-            # We can use AWK or cut to grab the first tag:
-            DEPLOY_TAG=$(echo "$IMAGE_TAGS" | cut -d',' -f1)
-
-            echo "📥 Pulling image: ghcr.io/$GITHUB_REPO:$DEPLOY_TAG"
+            # --- PULLING THE IMAGE ---
             
-            # 1. Pull the specific image using the tag we just extracted.
-            # We specify the image name and tag explicitly here to ensure it works.
-            docker pull ghcr.io/$GITHUB_REPO:$DEPLOY_TAG
+            echo "📥 Pulling image: $FULL_IMAGE_NAME"
+            docker pull "$FULL_IMAGE_NAME"
             
-            # 2. Export variables for docker-compose to use during 'up'
+            # Extract the simple tag (e.g., 'commit-bcabb6b') for docker-compose.prod.yml
+            # This is safer than the previous Bash expansion methods
+            SIMPLE_TAG=$(echo $FULL_IMAGE_NAME | awk -F: '{print $NF}')
+            
+            # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
             export GITHUB_REPOSITORY=$GITHUB_REPO
-            # Use the single, derived DEPLOY_TAG for the IMAGE_TAG variable 
-            # that is referenced in docker-compose.prod.yml
-            export IMAGE_TAG=$DEPLOY_TAG
+            export IMAGE_TAG=$SIMPLE_TAG
             
-            echo "🔄 Updating services..."
+            echo "🔄 Updating services with tag: $IMAGE_TAG"
+            
             # 'up -d' will recreate containers if the image changed
-            # The image service in docker-compose will now correctly use the exported IMAGE_TAG
             docker-compose -f docker-compose.prod.yml up -d --remove-orphans
             
             echo "🧹 Cleaning up old images..."
             docker image prune -af --filter "until=24h"
+            
+            echo "Deployment finished."
           ENDSSH
