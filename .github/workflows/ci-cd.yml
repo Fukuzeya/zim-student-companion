@@ -182,20 +182,25 @@ jobs:
           # Copy Nginx config
           scp -o StrictHostKeyChecking=no nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
 
-      # --- NEW STEP: Pre-process Tags Locally ---
+      # --- NEW STEP: Pre-process Tags Locally (FINAL VERSION) ---
       - name: 🧼 Clean and Prepare Tag Variable
         id: prepare_tag
         shell: bash
-        # Input tag string from the build job
         env:
           INPUT_TAGS: ${{ needs.build.outputs.image_tag }}
         run: |
-          # The input is like: 'ghcr.io/repo:commit-123,ghcr.io/repo:latest'
-          # Use sed to remove the comma and everything after it.
-          CLEAN_TAG=$(echo "$INPUT_TAGS" | sed 's/,.*//')
+          # 1. Use 'tr -d' to delete ALL newlines (\n) and carriage returns (\r).
+          # 2. Use 'tr' to convert the comma delimiter into a space.
+          # 3. Use 'awk' to reliably print the FIRST field (tag) only.
+          CLEAN_TAG=$(echo "$INPUT_TAGS" | tr -d '\n\r' | tr ',' ' ' | awk '{print $1}')
+          
+          if [ -z "$CLEAN_TAG" ]; then
+              echo "Error: Tag cleaning failed. The INPUT_TAGS was empty or malformed."
+              exit 1
+          fi
           
           echo "Clean Tag found: $CLEAN_TAG"
-          # Set the cleaned tag as an output variable for the next step to use
+          # Pass the single, clean string to the next step
           echo "CLEAN_TAG=$CLEAN_TAG" >> $GITHUB_OUTPUT
 
       - name: 🚀 Execute Deployment on Server
