@@ -40,11 +40,9 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-      # For Let's Encrypt Challenge
-      - certbot-etc:/etc/letsencrypt
-      - certbot-var:/var/lib/letsencrypt
-      - webroot:/var/www/certbot:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - zim-student-companion_certbot-etc:/etc/letsencrypt:ro
+      - zim-student-companion_webroot:/var/www/certbot:ro
     depends_on:
       - api
 
