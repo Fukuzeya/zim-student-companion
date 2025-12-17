@@ -210,32 +210,29 @@ jobs:
           echo "Clean Tag found: $COMMIT_TAG"
           echo "CLEAN_TAG=$COMMIT_TAG" >> $GITHUB_OUTPUT
 
+      # --- MODIFIED STEP: Execute Deployment on Server ---
       - name: 🚀 Execute Deployment on Server
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          # Use the cleaned variable from the previous step
           FULL_IMAGE_NAME: ${{ steps.prepare_tag.outputs.CLEAN_TAG }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
-          # We no longer need set -xe, but we keep set -e for safety
           ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
-            set -e
+            set -e # Exit immediately if any command fails
             
             cd /opt/zim-student-companion
             
             echo "🔐 Logging into Registry..."
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # --- PULLING THE IMAGE ---
-            
             echo "📥 Pulling image: $FULL_IMAGE_NAME"
             docker pull "$FULL_IMAGE_NAME"
             
-            # Extract the simple tag (e.g., 'commit-bcabb6b') for docker-compose.prod.yml
-            # This is safer than the previous Bash expansion methods
-            SIMPLE_TAG=$(echo $FULL_IMAGE_NAME | awk -F: '{print $NF}')
+            # --- FINAL TAG EXTRACTION FIX ---
+            # Extract the simple tag (e.g., 'commit-204d156')
+            SIMPLE_TAG="${FULL_IMAGE_NAME##*:}"
             
             # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
             export GITHUB_REPOSITORY=$GITHUB_REPO
@@ -243,8 +240,9 @@ jobs:
             
             echo "🔄 Updating services with tag: $IMAGE_TAG"
             
-            # 'up -d' will recreate containers if the image changed
-            docker-compose -f docker-compose.prod.yml up -d --remove-orphans
+            # --- DOCKER COMPOSE SYNTAX FIX ---
+            # Replace 'docker-compose' with 'docker compose' (with a space)
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
             
             echo "🧹 Cleaning up old images..."
             docker image prune -af --filter "until=24h"
