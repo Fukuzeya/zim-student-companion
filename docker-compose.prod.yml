@@ -135,6 +135,8 @@ volumes:
   postgres_data:
   redis_data:
   qdrant_data:
-  certbot-etc:
-  certbot-var:
-  webroot:
+  zim-student-companion_certbot-etc:
+    external: true  # This tells Docker the volume already exists from your manual Certbot run
+  # 👇 AND THIS ONE 👇
+  zim-student-companion_webroot:
+    external: true
