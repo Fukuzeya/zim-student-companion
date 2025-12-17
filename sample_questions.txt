@@ -1,0 +1,276 @@
+# RAG Testing Guide for Zim Student Companion
+
+## 🔍 Step 1: Check if Documents Were Ingested
+
+First, verify your documents are actually in the vector store.
+
+### API Call: Check Collections
+```bash
+curl http://localhost:8000/api/v1/rag-debug/collections
+```
+
+**Expected Response (if documents exist):**
+```json
+{
+  "collections": {
+    "zimsec_syllabi": {"status": "exists", "points_count": 45},
+    "zimsec_past_papers": {"status": "exists", "points_count": 120},
+    ...
+  },
+  "total_documents": 165
+}
+```
+
+**If you see `points_count: 0`** → Documents weren't ingested properly!
+
+---
+
+## 🔍 Step 2: Browse What's In Your Collections
+
+```bash
+curl "http://localhost:8000/api/v1/rag-debug/collections/zimsec_past_papers/browse?limit=5"
+```
+
+This shows you the actual content and metadata stored.
+
+---
+
+## 🔍 Step 3: Test Simple Search (No Filters)
+
+This tests if semantic search works at all:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag-debug/search/simple \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "computer science",
+    "limit": 5
+  }'
+```
+
+**If this returns results but your RAG doesn't** → The filters are too restrictive!
+
+---
+
+## 🔧 Common Issue: Metadata Mismatch
+
+Your documents likely have metadata that doesn't match your search filters.
+
+### Check what metadata your documents have:
+```bash
+curl "http://localhost:8000/api/v1/rag-debug/collections/zimsec_past_papers/browse?limit=3"
+```
+
+Look at the `metadata` field. It might show:
+```json
+{
+  "subject": "computer science",  // lowercase?
+  "education_level": "secondary",
+  "grade": "Form 3"
+}
+```
+
+But your search might be looking for:
+```json
+{
+  "subject": "Computer Science",  // Different case!
+  "education_level": "secondary",
+  "grade": "Form 3"
+}
+```
+
+---
+
+## 📝 Step 4: Test RAG Query Prompts
+
+### For Computer Science Syllabus & Papers, try these prompts:
+
+**Prompt 1 - General Topic:**
+```json
+{
+  "question": "What topics are covered in computer science?",
+  "student_context": {
+    "first_name": "Test",
+    "education_level": "secondary",
+    "grade": "Form 3",
+    "current_subject": "Computer Science",
+    "preferred_language": "english"
+  },
+  "mode": "explain"
+}
+```
+
+**Prompt 2 - Specific Concept:**
+```json
+{
+  "question": "Explain binary number system",
+  "student_context": {
+    "first_name": "Test",
+    "education_level": "secondary",
+    "grade": "Form 3",
+    "current_subject": "Computer Science",
+    "preferred_language": "english"
+  },
+  "mode": "explain"
+}
+```
+
+**Prompt 3 - Past Paper Style:**
+```json
+{
+  "question": "What is an algorithm? Give an example",
+  "student_context": {
+    "first_name": "Test",
+    "education_level": "secondary",
+    "grade": "Form 4",
+    "current_subject": "Computer Science",
+    "preferred_language": "english"
+  },
+  "mode": "socratic"
+}
+```
+
+**Prompt 4 - Practice Question:**
+```json
+{
+  "question": "Give me a practice question about data types",
+  "student_context": {
+    "first_name": "Test",
+    "education_level": "secondary",
+    "grade": "Form 3",
+    "current_subject": "Computer Science",
+    "preferred_language": "english"
+  },
+  "mode": "practice"
+}
+```
+
+---
+
+## 🛠️ Quick Fix: Re-ingest Documents with Correct Metadata
+
+If your documents weren't ingested properly, use the file upload endpoint:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag-debug/ingest/file \
+  -F "file=@./specimen_paper_1.pdf" \
+  -F "subject=Computer Science" \
+  -F "education_level=secondary" \
+  -F "grade=Form 3" \
+  -F "document_type=past_paper" \
+  -F "year=2024" \
+  -F "paper=Paper 1"
+```
+
+---
+
+## 🧪 Full Debug Test
+
+Use this endpoint to see the complete pipeline:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag-debug/test/full-rag \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What is a variable in programming?",
+    "subject": "Computer Science",
+    "grade": "Form 3",
+    "education_level": "secondary",
+    "mode": "explain"
+  }'
+```
+
+This will show you:
+1. How many documents are in each collection
+2. Results from search WITHOUT filters
+3. Results from search WITH filters
+4. The final RAG response
+
+---
+
+## 📋 Checklist for Debugging
+
+- [ ] **Collections exist?** Check `/rag-debug/collections`
+- [ ] **Documents in collections?** `points_count > 0`
+- [ ] **Simple search works?** `/rag-debug/search/simple`
+- [ ] **Metadata matches?** Browse collection and check field names/values
+- [ ] **Filters correct?** Test with `/rag-debug/search/filtered`
+
+---
+
+## 🔧 Fix: Update Vector Store Search to Be Less Strict
+
+If filters are causing issues, you can temporarily disable them in `vector_store.py`:
+
+```python
+async def search(
+    self,
+    query: str,
+    collection_keys: List[str] = None,
+    filters: Dict[str, Any] = None,
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    """Search across collections with filters"""
+    query_embedding = await self.generate_query_embedding(query)
+    
+    all_results = []
+    collections = collection_keys or list(self.collections.values())
+    
+    # TEMPORARY: Disable filters for testing
+    query_filter = None  # Comment this out when filters work
+    
+    # ... rest of search code
+```
+
+---
+
+## 📚 Sample Test Content (Quick Ingest)
+
+If you want to quickly test without uploading files:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag-debug/ingest/quick \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Computer Science Syllabus Form 3: Topics include: 1. Introduction to Computing - History of computers, generations of computers, types of computers. 2. Data Representation - Binary system, hexadecimal, ASCII code, data types. 3. Programming Concepts - Variables, constants, data types, operators, control structures, loops. 4. Algorithms - Definition, flowcharts, pseudocode, problem solving. 5. Hardware - CPU, memory, storage devices, input/output devices.",
+    "subject": "Computer Science",
+    "education_level": "secondary",
+    "grade": "Form 3",
+    "document_type": "syllabus",
+    "topic": "Overview"
+  }'
+```
+
+Then test with:
+```json
+{
+  "question": "What topics are covered in Form 3 Computer Science?",
+  "student_context": {
+    "first_name": "Test",
+    "education_level": "secondary",
+    "grade": "Form 3",
+    "current_subject": "Computer Science",
+    "preferred_language": "english"
+  }
+}
+```
+
+---
+
+## 🎯 Expected Working Response
+
+When RAG is working properly, you should see:
+
+```json
+{
+  "response": "Great question! Let me help you understand what we'll be covering...\n\nIn Form 3 Computer Science, you'll learn about:\n\n1. **Data Representation** - How computers store information using binary...\n\nLet me ask you: Do you know why computers use only 0s and 1s?",
+  "sources_used": 3,
+  "sources": [
+    {
+      "content_preview": "Computer Science Syllabus Form 3: Topics include...",
+      "score": 0.89,
+      "metadata": {"subject": "Computer Science", "grade": "Form 3"}
+    }
+  ]
+}
+```
