@@ -182,26 +182,33 @@ jobs:
           # Copy Nginx config
           scp -o StrictHostKeyChecking=no nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
 
-      # --- NEW STEP: Pre-process Tags Locally (FINAL, FINAL VERSION) ---
+      # --- NEW STEP: Pre-process Tags Locally (FINAL, FINAL, FINAL VERSION) ---
       - name: 🧼 Clean and Prepare Tag Variable
         id: prepare_tag
         shell: bash
         env:
           INPUT_TAGS: ${{ needs.build.outputs.image_tag }}
         run: |
-          # 1. Use 'tr -d' to delete all newlines/tabs/carriage returns.
-          # 2. Use 'tr' to replace the comma delimiter with a single SPACE.
-          # 3. Use 'awk' to select the FIRST field (tag) only.
-          CLEAN_TAG=$(echo "$INPUT_TAGS" | tr -d '\n\r\t' | tr ',' ' ' | awk '{print $1}')
+          # 1. Use 'sed' to replace all commas and whitespace with a single space.
+          # We target the most common delimiters (comma, newline, space) and collapse them.
+          CLEAN_STRING=$(echo "$INPUT_TAGS" | sed -e 's/[,[:space:]]\+/ /g' | xargs)
           
-          if [ -z "$CLEAN_TAG" ]; then
-              echo "Error: Tag cleaning failed. The INPUT_TAGS was empty or malformed."
+          # 2. Use 'awk' to select the SECOND field ($2), which is the unique commit tag.
+          # The tags are typically ordered: [1]=latest, [2]=commit-hash.
+          COMMIT_TAG=$(echo "$CLEAN_STRING" | awk '{print $2}')
+          
+          # 3. Fallback: If no second tag exists (e.g., only 'latest' was built), use the first tag.
+          if [ -z "$COMMIT_TAG" ]; then
+              COMMIT_TAG=$(echo "$CLEAN_STRING" | awk '{print $1}')
+          fi
+
+          if [ -z "$COMMIT_TAG" ]; then
+              echo "Error: Final tag cleaning failed. The final tag could not be determined."
               exit 1
           fi
           
-          echo "Clean Tag found: $CLEAN_TAG"
-          # Pass the single, clean string to the next step
-          echo "CLEAN_TAG=$CLEAN_TAG" >> $GITHUB_OUTPUT
+          echo "Clean Tag found: $COMMIT_TAG"
+          echo "CLEAN_TAG=$COMMIT_TAG" >> $GITHUB_OUTPUT
 
       - name: 🚀 Execute Deployment on Server
         env:
