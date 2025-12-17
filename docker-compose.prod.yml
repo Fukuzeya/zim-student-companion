@@ -1,5 +1,5 @@
 # ============================================================================
-# docker-compose.prod.yml - Production Setup
+# docker-compose.prod.yml - Final Production Setup
 # ============================================================================
 
 services:
@@ -12,22 +12,19 @@ services:
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     
-    environment:
-      # Pass internal connection URLs and variables defined in the .env file
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379/0
-      - QDRANT_HOST=qdrant
-      - SECRET_KEY=${SECRET_KEY}
-      # Add any other production environment variables here
+    environment: # <-- Using the correct Mapping Format
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_HOST: qdrant
+      SECRET_KEY: ${SECRET_KEY}
       
     expose:
-      # Expose port 8000 ONLY to the internal Docker network
       - 8000
       
     depends_on:
       - postgres
       - redis
-      - qdrant # <-- NEW DEPENDENCY
+      - qdrant
       - celery_worker
       
   # ----------------------------------------
@@ -37,15 +34,12 @@ services:
     image: nginx:alpine
     restart: unless-stopped
     volumes:
-      # Mount the custom Nginx config file
       - ./nginx/nginx.prod.conf:/etc/nginx/conf.d/default.conf
     ports:
-      # Map public port 80 to the container's port 80
       - "80:80"
-      # If using SSL/TLS, uncomment port 443
-      # - "443:443"
+      # - "443:443" # For HTTPS
     depends_on:
-      - api # Nginx must wait for the API service to start
+      - api 
 
   # ----------------------------------------
   # 3. PostgreSQL Database
@@ -53,15 +47,14 @@ services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
-    environment:
-      # Database variables should be sourced from the .env file
-      POSTGRES_USER=${POSTGRES_USER}
-      POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      POSTGRES_DB=${POSTGRES_DB}
+    environment: # <-- **CRITICAL FIX: This is now a clean Mapping**
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTTRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -84,13 +77,12 @@ services:
   # 5. Qdrant Vector Database
   # ----------------------------------------
   qdrant:
-    image: qdrant/qdrant:v1.10.1 # Pin to a stable version
+    image: qdrant/qdrant:v1.10.1
     restart: unless-stopped
-    # Use environment variables for performance tuning and internal networking
     environment:
       QDRANT__STORAGE__WRITE_CONCURRENCY: 4
       QDRANT__STORAGE__MAX_SEARCH_THREADS: 8
-      QDRANT__SERVICE__HOST: 0.0.0.0 # Listen on all internal interfaces
+      QDRANT__SERVICE__HOST: 0.0.0.0
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
@@ -106,8 +98,8 @@ services:
     image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       - postgres
       - redis
@@ -120,8 +112,8 @@ services:
     image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       - postgres
       - redis
@@ -130,4 +122,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  qdrant_data: # <-- New persistent volume for vector data
+  qdrant_data:
