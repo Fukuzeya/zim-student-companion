@@ -250,16 +250,20 @@ jobs:
             echo "Deployment finished."
           ENDSSH
 
-      - name: Deploy to Linode
+      - name: Deploy to Production
+        env:
+          SSH_HOST: ${{ secrets.LINODE_HOST }}
+          SSH_USER: ${{ secrets.LINODE_USER }}
         run: |
-          ssh user@host << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$SSH_HOST << 'ENDSSH'
             cd /opt/zim-student-companion
-            # 1. Pull the absolute newest image from GHCR
+            
+            # Set variables so Docker Compose works manually
+            export GITHUB_REPOSITORY="fukuzeya/zim-student-companion"
+            export IMAGE_TAG="latest"
+            
+            # Force the update
             docker compose -f docker-compose.prod.yml pull
-            
-            # 2. Re-create the containers with the new image
             docker compose -f docker-compose.prod.yml up -d --force-recreate
-            
-            # 3. Optional: Remove old images to save space
             docker image prune -f
           ENDSSH
