@@ -16,7 +16,7 @@ import json
 
 from app.core.database import get_db
 from app.models.user import User
-from app.api.v1.administration import require_admin
+from app.api.v1.admin import require_admin
 from app.services.admin.competition_service import CompetitionManagementService
 from app.services.admin.payment_service import PaymentManagementService
 from app.services.admin.analytics_service import AnalyticsService

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from uuid import UUID
 
-from app.api.v1.administration import require_admin
+from app.api.v1.admin import require_admin
 from app.core.database import get_db
 from app.models.user import User
 from app.services.admin.content_service import ContentManagementService
