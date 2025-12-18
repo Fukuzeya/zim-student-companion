@@ -3,6 +3,8 @@
 # ============================================================================
 from fastapi import APIRouter
 
+from app.api.v1 import admin, admin_content, admin_operations, admin_websocket
+
 api_router = APIRouter()
 
 # Import and include route modules - with error handling
@@ -60,13 +62,16 @@ try:
 except ImportError:
     print("⚠️ rag_test routes not found")
     
-try:
-    from app.api.v1 import rag_debug
-    api_router.include_router(rag_debug.router)
-except ImportError:
-    print("⚠️ rag_debug routes not found")
-
 # Add a test endpoint
 @api_router.get("/test")
 async def test_endpoint():
     return {"message": "API is working!", "version": "v1"}
+
+# Dashboard, Users, Students endpoints
+api_router.include_router(admin.router)
+# Content (Subjects, Topics, Questions), Documents, Conversations
+api_router.include_router(admin_content.router)
+# Competitions, Payments, Analytics, Notifications, System
+api_router.include_router(admin_operations.router)
+# WebSocket endpoints for real-time features
+api_router.include_router(admin_websocket.router)

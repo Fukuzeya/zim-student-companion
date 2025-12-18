@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "dev-jwt-secret-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_SECRET_KEY : str = "dev-refresh-secret-change-in-production"
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
     # Rate Limits
     FREE_DAILY_QUESTIONS: int = 5
