@@ -249,3 +249,17 @@ jobs:
             
             echo "Deployment finished."
           ENDSSH
+
+      - name: Deploy to Linode
+        run: |
+          ssh user@host << 'ENDSSH'
+            cd /opt/zim-student-companion
+            # 1. Pull the absolute newest image from GHCR
+            docker compose -f docker-compose.prod.yml pull
+            
+            # 2. Re-create the containers with the new image
+            docker compose -f docker-compose.prod.yml up -d --force-recreate
+            
+            # 3. Optional: Remove old images to save space
+            docker image prune -f
+          ENDSSH
