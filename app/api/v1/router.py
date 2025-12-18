@@ -3,16 +3,16 @@
 # ============================================================================
 from fastapi import APIRouter
 
-from app.api.v1 import admin, admin_content, admin_operations, admin_websocket
+from app.api.v1 import admin, admin_content, admin_operations, admin_websocket, auth
 
 api_router = APIRouter()
 
 # Import and include route modules - with error handling
-try:
-    from app.api.v1 import auth
-    api_router.include_router(auth.router)
-except ImportError:
-    print("⚠️ auth routes not found")
+# try:
+#     from app.api.v1 import auth
+#     api_router.include_router(auth.router)
+# except ImportError:
+#     print("⚠️ auth routes not found")
 
 try:
     from app.api.v1 import students
@@ -75,3 +75,4 @@ api_router.include_router(admin_content.router)
 api_router.include_router(admin_operations.router)
 # WebSocket endpoints for real-time features
 api_router.include_router(admin_websocket.router)
+api_router.include_router(auth.router)

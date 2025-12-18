@@ -95,6 +95,14 @@ class MessageResponse(BaseModel):
     """Generic message response"""
     message: str
     success: bool = True
+    
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+    
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
 
 
 # ============================================================================
@@ -612,37 +620,32 @@ async def update_current_user_profile(
 # ============================================================================
 @router.post("/change-password", response_model=MessageResponse)
 async def change_password(
-    current_password: str,
-    new_password: str = Field(..., min_length=8),
+    payload: ChangePasswordRequest,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Change current user's password.
-    
-    Requires current password for verification.
-    New password must be at least 8 characters.
     """
     if not current_user.password_hash:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No password set. Use forgot password to set one."
         )
-    
-    if not verify_password(current_password, current_user.password_hash):
+
+    if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect"
         )
-    
-    current_user.password_hash = get_password_hash(new_password)
+
+    current_user.password_hash = get_password_hash(payload.new_password)
     await db.commit()
-    
+
     return MessageResponse(
         message="Password changed successfully",
         success=True
     )
-
 
 @router.post("/forgot-password", response_model=MessageResponse)
 async def forgot_password(
@@ -685,50 +688,46 @@ async def forgot_password(
 
 @router.post("/reset-password", response_model=MessageResponse)
 async def reset_password(
-    token: str,
-    new_password: str = Field(..., min_length=8),
-    db: AsyncSession = Depends(get_db)
+    payload: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Reset password using reset token.
-    
-    Token must be valid and not expired.
     """
     from app.core.redis import cache
-    
+
     # Validate reset token
-    user_id = await cache.get(f"password_reset:{token}")
-    
+    user_id = await cache.get(f"password_reset:{payload.token}")
+
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired reset token"
         )
-    
+
     # Get user
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User not found"
         )
-    
+
     # Update password
-    user.password_hash = get_password_hash(new_password)
+    user.password_hash = get_password_hash(payload.new_password)
     await db.commit()
-    
-    # Delete used token
-    await cache.delete(f"password_reset:{token}")
-    
-    # Revoke all refresh tokens (force re-login)
+
+    # Cleanup
+    await cache.delete(f"password_reset:{payload.token}")
     await cache.delete(f"refresh_token:{user.id}")
-    
+
     return MessageResponse(
         message="Password reset successfully. Please login with your new password.",
         success=True
     )
+
 
 
 # ============================================================================

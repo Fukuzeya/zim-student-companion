@@ -21,7 +21,7 @@ class SubscriptionTierEnum(str, Enum):
     SCHOOL = "school"
 
 class UserBase(BaseModel):
-    phone_number: str = Field(..., regex=r"^\+?[0-9]{10,15}$")
+    phone_number: str = Field(..., pattern=r"^\+?[0-9]{10,15}$")
     email: Optional[str] = None
     role: UserRoleEnum = UserRoleEnum.STUDENT
 
