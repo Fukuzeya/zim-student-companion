@@ -1,3 +1,4 @@
+import secrets
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from functools import lru_cache
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     WHATSAPP_VERIFY_TOKEN: str = "dev-verify-token"
     WHATSAPP_API_URL: str = "https://graph.facebook.com/v18.0"
     WHATSAPP_BUSINESS_ACCOUNT_ID: Optional[str] = Field(..., env="WHATSAPP_BUSINESS_ACCOUNT_ID")
+    WHATSAPP_APP_SECRET : Optional[str] = Field(None, env="WHATSAPP_APP_SECRET")
     
     # Paynow - Optional with empty defaults
     PAYNOW_INTEGRATION_ID: str = ""
@@ -38,11 +40,23 @@ class Settings(BaseSettings):
     PAYNOW_RETURN_URL: str = "http://localhost:8000/payment/success"
     
     # JWT
-    JWT_SECRET_KEY: str = "dev-jwt-secret-change-in-production"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_SECRET_KEY : str = "dev-refresh-secret-change-in-production"
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Token expiration times
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 minutes
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7 days
+    # Secret key for JWT signing (generate with: openssl rand -hex 32)
+    JWT_SECRET_KEY: str = Field(
+        default_factory=lambda: secrets.token_hex(32),
+        description="Secret key for JWT access tokens"
+    )
+    
+    # Separate secret for refresh tokens (additional security layer)
+    REFRESH_SECRET_KEY: str = Field(
+        default_factory=lambda: secrets.token_hex(32),
+        description="Secret key for JWT refresh tokens"
+    )
+    # Password requirements
+    MIN_PASSWORD_LENGTH: int = 8
     
     # Rate Limits
     FREE_DAILY_QUESTIONS: int = 5
