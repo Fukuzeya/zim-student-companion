@@ -8,6 +8,7 @@ Usage:
     python scripts/create_admin.py --phone +263771234567 --email admin@zimstudent.com --password SecurePass123
 """
 
+
 import asyncio
 import argparse
 import sys

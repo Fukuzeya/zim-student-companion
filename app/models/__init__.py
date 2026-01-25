@@ -5,11 +5,13 @@ from app.models.gamification import Achievement, StudentAchievement, StudentStre
 from app.models.gamification import Competition, CompetitionParticipant
 from app.models.payment import SubscriptionPlan, Payment
 from app.models.conversation import Conversation
+from app.models.document import UploadedDocument, DocumentProcessingLog, DocumentStatus, DocumentType
 
 __all__ = [
     "User", "Student", "ParentStudentLink", "UserRole", "EducationLevel",
     "SubscriptionTier", "Subject", "Topic", "LearningObjective", "Question",
     "PracticeSession", "QuestionAttempt", "Achievement", "StudentAchievement",
     "StudentStreak", "StudentTopicProgress", "Competition", "CompetitionParticipant",
-    "SubscriptionPlan", "Payment", "Conversation"
+    "SubscriptionPlan", "Payment", "Conversation", "UploadedDocument",
+    "DocumentProcessingLog", "DocumentStatus", "DocumentType"
 ]

@@ -42,28 +42,32 @@ class DashboardService:
     async def get_dashboard_stats(self) -> Dict[str, Any]:
         """
         Retrieve all KPI card data for the main dashboard.
-        
+
         Returns:
             Dictionary containing all KPI metrics with trend data
         """
-        now = datetime.utcnow()
-        today = now.date()
-        yesterday = today - timedelta(days=1)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        last_month_start = (month_start - timedelta(days=1)).replace(day=1)
-        week_ago = today - timedelta(days=7)
-        two_weeks_ago = today - timedelta(days=14)
-        
-        return {
-            "total_users": await self._get_total_users_kpi(yesterday),
-            "active_students_today": await self._get_active_students_kpi(today, yesterday),
-            "messages_24h": await self._get_messages_kpi(now),
-            "revenue_this_month": await self._get_revenue_kpi(month_start, last_month_start),
-            "active_subscriptions": await self._get_subscriptions_kpi(),
-            "conversion_rate": await self._get_conversion_rate_kpi(week_ago, two_weeks_ago),
-            "avg_session_duration": await self._get_session_duration_kpi(week_ago),
-            "questions_answered_today": await self._get_questions_kpi(today, yesterday),
-        }
+        try:
+            now = datetime.utcnow()
+            today = now.date()
+            yesterday = today - timedelta(days=1)
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            last_month_start = (month_start - timedelta(days=1)).replace(day=1)
+            week_ago = today - timedelta(days=7)
+            two_weeks_ago = today - timedelta(days=14)
+
+            return {
+                "total_users": await self._get_total_users_kpi(yesterday),
+                "active_students_today": await self._get_active_students_kpi(today, yesterday),
+                "messages_24h": await self._get_messages_kpi(now),
+                "revenue_this_month": await self._get_revenue_kpi(month_start, last_month_start),
+                "active_subscriptions": await self._get_subscriptions_kpi(),
+                "conversion_rate": await self._get_conversion_rate_kpi(week_ago, two_weeks_ago),
+                "avg_session_duration": await self._get_session_duration_kpi(week_ago),
+                "questions_answered_today": await self._get_questions_kpi(today, yesterday),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching dashboard stats: {e}")
+            raise
     
     async def _get_total_users_kpi(self, yesterday: date) -> Dict[str, Any]:
         """Calculate total users with growth percentage"""
@@ -290,26 +294,30 @@ class DashboardService:
     async def get_dashboard_charts(self, days: int = 30) -> Dict[str, Any]:
         """
         Retrieve all chart data for dashboard visualizations.
-        
+
         Args:
             days: Number of days to include in time series data
-            
+
         Returns:
             Dictionary containing data for all dashboard charts
         """
-        start_date = date.today() - timedelta(days=days)
-        
-        return {
-            "user_growth": await self._get_user_growth_chart(start_date),
-            "revenue_trend": await self._get_revenue_trend_chart(start_date),
-            "subscription_distribution": await self._get_subscription_distribution(),
-            "active_hours_heatmap": await self._get_active_hours_heatmap(),
-            "subject_popularity": await self._get_subject_popularity(),
-            "daily_active_users": await self._get_dau_sparkline(start_date),
-        }
+        try:
+            start_date = date.today() - timedelta(days=days)
+
+            return {
+                "user_growth": await self._get_user_growth_chart(start_date),
+                "revenue_trend": await self._get_revenue_trend_chart(start_date),
+                "subscription_distribution": await self._get_subscription_distribution(),
+                "active_hours_heatmap": await self._get_active_hours_heatmap(),
+                "subject_popularity": await self._get_subject_popularity(),
+                "daily_active_users": await self._get_dau_sparkline(start_date),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching dashboard charts: {e}")
+            raise
     
     async def _get_user_growth_chart(self, start_date: date) -> List[Dict[str, Any]]:
-        """Get daily user registration data"""
+        """Get daily user registration data with gap filling"""
         result = await self.db.execute(
             select(
                 func.date(User.created_at).label("date"),
@@ -319,14 +327,26 @@ class DashboardService:
             .group_by(func.date(User.created_at))
             .order_by(func.date(User.created_at))
         )
-        
-        return [
-            {"timestamp": row.date.isoformat(), "value": row.count, "label": "New Users"}
-            for row in result.all()
-        ]
+
+        # Create a map of existing data
+        data_map = {row.date: row.count for row in result.all()}
+
+        # Fill gaps with zeros for continuous time series
+        filled_data = []
+        current = start_date
+        today = date.today()
+        while current <= today:
+            filled_data.append({
+                "timestamp": current.isoformat(),
+                "value": data_map.get(current, 0),
+                "label": "New Users"
+            })
+            current += timedelta(days=1)
+
+        return filled_data
     
     async def _get_revenue_trend_chart(self, start_date: date) -> List[Dict[str, Any]]:
-        """Get daily revenue data"""
+        """Get daily revenue data with gap filling"""
         result = await self.db.execute(
             select(
                 func.date(Payment.completed_at).label("date"),
@@ -337,11 +357,23 @@ class DashboardService:
             .group_by(func.date(Payment.completed_at))
             .order_by(func.date(Payment.completed_at))
         )
-        
-        return [
-            {"timestamp": row.date.isoformat(), "value": float(row.amount or 0), "label": "Revenue"}
-            for row in result.all()
-        ]
+
+        # Create a map of existing data
+        data_map = {row.date: float(row.amount or 0) for row in result.all()}
+
+        # Fill gaps with zeros for continuous time series
+        filled_data = []
+        current = start_date
+        today = date.today()
+        while current <= today:
+            filled_data.append({
+                "timestamp": current.isoformat(),
+                "value": data_map.get(current, 0.0),
+                "label": "Revenue"
+            })
+            current += timedelta(days=1)
+
+        return filled_data
     
     async def _get_subscription_distribution(self) -> List[Dict[str, Any]]:
         """Get subscription tier distribution"""
@@ -405,7 +437,7 @@ class DashboardService:
         ]
     
     async def _get_dau_sparkline(self, start_date: date) -> List[Dict[str, Any]]:
-        """Get daily active users for sparkline"""
+        """Get daily active users for sparkline with gap filling"""
         result = await self.db.execute(
             select(
                 func.date(User.last_active).label("date"),
@@ -415,11 +447,22 @@ class DashboardService:
             .group_by(func.date(User.last_active))
             .order_by(func.date(User.last_active))
         )
-        
-        return [
-            {"timestamp": row.date.isoformat(), "value": row.count}
-            for row in result.all()
-        ]
+
+        # Create a map of existing data
+        data_map = {row.date: row.count for row in result.all()}
+
+        # Fill gaps with zeros for continuous time series
+        filled_data = []
+        current = start_date
+        today = date.today()
+        while current <= today:
+            filled_data.append({
+                "timestamp": current.isoformat(),
+                "value": data_map.get(current, 0)
+            })
+            current += timedelta(days=1)
+
+        return filled_data
     
     # =========================================================================
     # Activity Feed
@@ -427,37 +470,42 @@ class DashboardService:
     async def get_activity_feed(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """
         Retrieve recent activity feed for the dashboard.
-        
+
         Args:
             limit: Maximum number of items to return
             offset: Pagination offset
-            
+
         Returns:
             Dictionary with activity items and pagination info
         """
-        activities = []
-        
-        # Get recent registrations
-        registrations = await self._get_recent_registrations(limit=10)
-        activities.extend(registrations)
-        
-        # Get recent subscription changes
-        subscriptions = await self._get_recent_subscriptions(limit=10)
-        activities.extend(subscriptions)
-        
-        # Get recent competition completions
-        competitions = await self._get_recent_competition_completions(limit=5)
-        activities.extend(competitions)
-        
-        # Sort by timestamp and paginate
-        activities.sort(key=lambda x: x["timestamp"], reverse=True)
-        paginated = activities[offset:offset + limit]
-        
-        return {
-            "items": paginated,
-            "total_count": len(activities),
-            "has_more": len(activities) > offset + limit
-        }
+        try:
+            activities = []
+
+            # Get recent registrations
+            registrations = await self._get_recent_registrations(limit=15)
+            activities.extend(registrations)
+
+            # Get recent subscription changes
+            subscriptions = await self._get_recent_subscriptions(limit=15)
+            activities.extend(subscriptions)
+
+            # Get recent competition completions
+            competitions = await self._get_recent_competition_completions(limit=10)
+            activities.extend(competitions)
+
+            # Sort by timestamp and paginate
+            activities.sort(key=lambda x: x["timestamp"], reverse=True)
+            total_count = len(activities)
+            paginated = activities[offset:offset + limit]
+
+            return {
+                "items": paginated,
+                "total_count": total_count,
+                "has_more": total_count > offset + limit
+            }
+        except Exception as e:
+            logger.error(f"Error fetching activity feed: {e}")
+            raise
     
     async def _get_recent_registrations(self, limit: int) -> List[Dict[str, Any]]:
         """Get recent user registrations"""

@@ -16,7 +16,7 @@ database_url = settings.DATABASE_URL
 if database_url.startswith("postgresql://"):
     database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-print(f"📦 Connecting to database: {database_url.split('@')[1] if '@' in database_url else database_url}")
+print(f"[DB] Connecting to database: {database_url.split('@')[1] if '@' in database_url else database_url}")
 
 engine = create_async_engine(
     database_url,

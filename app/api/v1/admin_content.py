@@ -5,17 +5,25 @@
 Content management, document upload, and conversation monitoring endpoints.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from uuid import UUID
+import io
 
 from app.api.v1.admin import require_admin
 from app.core.database import get_db
 from app.models.user import User
 from app.services.admin.content_service import ContentManagementService
-from app.services.admin.document_service import DocumentUploadService
+from app.services.admin.document_service_enhanced import DocumentUploadServiceEnhanced as DocumentUploadService
 from app.services.admin.conversation_service import ConversationMonitoringService
 from app.services.admin.system_service import SystemService, AuditAction
+from app.schemas.admin import (
+    SubjectCreate, SubjectUpdate, SubjectResponse, SubjectListResponse,
+    SubjectSortField, SortOrder, SubjectBulkAction, SubjectBulkActionResponse,
+    SubjectStats, SubjectDetailResponse, SubjectExportRequest, SubjectExportResponse,
+    SubjectDependencyWarning
+)
 
 router = APIRouter(prefix="/admin", tags=["admin-content"])
 
@@ -23,63 +31,139 @@ router = APIRouter(prefix="/admin", tags=["admin-content"])
 # ============================================================================
 # Subject Management Endpoints
 # ============================================================================
-@router.get("/subjects")
+@router.get("/subjects", response_model=SubjectListResponse)
 async def list_subjects(
-    education_level: Optional[str] = None,
-    is_active: Optional[bool] = None,
+    # Filtering
+    search: Optional[str] = Query(None, description="Search in name, code, description"),
+    education_level: Optional[str] = Query(None, description="Filter by education level"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    has_topics: Optional[bool] = Query(None, description="Filter subjects with/without topics"),
+    has_questions: Optional[bool] = Query(None, description="Filter subjects with/without questions"),
+    # Sorting
+    sort_by: SubjectSortField = Query(SubjectSortField.NAME, description="Field to sort by"),
+    sort_order: SortOrder = Query(SortOrder.ASC, description="Sort direction"),
+    # Pagination
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=10, le=100, description="Items per page"),
+    # Auth
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """List all subjects with topic and question counts"""
+    """
+    List subjects with filtering, sorting, and pagination.
+
+    Supports:
+    - Full-text search across name, code, and description
+    - Filter by education level, active status, content availability
+    - Sort by name, code, created date, topic count, or question count
+    - Server-side pagination
+    """
     service = ContentManagementService(db)
-    return await service.list_subjects(education_level=education_level, is_active=is_active)
+    return await service.list_subjects_paginated(
+        search=search,
+        education_level=education_level,
+        is_active=is_active,
+        has_topics=has_topics,
+        has_questions=has_questions,
+        sort_by=sort_by.value,
+        sort_order=sort_order.value,
+        page=page,
+        page_size=page_size
+    )
 
 
-@router.post("/subjects")
+@router.get("/subjects/stats", response_model=SubjectStats)
+async def get_subject_stats(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get comprehensive subject statistics including counts, distribution, and trends"""
+    service = ContentManagementService(db)
+    return await service.get_subject_stats()
+
+
+@router.get("/subjects/{subject_id}", response_model=SubjectDetailResponse)
+async def get_subject_detail(
+    subject_id: UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get detailed subject information including topics, coverage, and difficulty distribution"""
+    service = ContentManagementService(db)
+    result = await service.get_subject_detail(subject_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Subject not found")
+    return result
+
+
+@router.get("/subjects/{subject_id}/dependencies", response_model=SubjectDependencyWarning)
+async def check_subject_dependencies(
+    subject_id: UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Check dependencies before deleting a subject. Returns warnings if subject has related content."""
+    service = ContentManagementService(db)
+    return await service.check_subject_dependencies(subject_id)
+
+
+@router.post("/subjects", response_model=SubjectResponse)
 async def create_subject(
-    name: str = Form(...),
-    code: str = Form(...),
-    education_level: str = Form(...),
-    description: Optional[str] = Form(None),
-    icon: Optional[str] = Form(None),
-    color: Optional[str] = Form(None),
+    data: SubjectCreate,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Create a new subject"""
+    """
+    Create a new subject with full validation.
+
+    Code must be unique, uppercase, and match pattern [A-Z0-9-]+
+    """
     service = ContentManagementService(db)
-    data = {
-        "name": name,
-        "code": code,
-        "education_level": education_level,
-        "description": description,
-        "icon": icon,
-        "color": color
-    }
-    return await service.create_subject(data)
+    result = await service.create_subject(data.model_dump())
+
+    # Audit log
+    system_service = SystemService(db)
+    await system_service.log_action(
+        admin_id=admin.id,
+        admin_email=admin.email or "",
+        action=AuditAction.CREATE,
+        resource_type="subject",
+        resource_id=result.get("id"),
+        details=data.model_dump()
+    )
+
+    return result
 
 
-@router.put("/subjects/{subject_id}")
+@router.put("/subjects/{subject_id}", response_model=SubjectResponse)
 async def update_subject(
     subject_id: UUID,
-    name: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    icon: Optional[str] = Form(None),
-    color: Optional[str] = Form(None),
-    is_active: Optional[bool] = Form(None),
+    data: SubjectUpdate,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Update an existing subject"""
+    """Update an existing subject with partial data"""
     service = ContentManagementService(db)
-    updates = {k: v for k, v in {
-        "name": name, "description": description,
-        "icon": icon, "color": color, "is_active": is_active
-    }.items() if v is not None}
-    
+    updates = data.model_dump(exclude_none=True)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
     result = await service.update_subject(subject_id, updates)
     if not result:
         raise HTTPException(status_code=404, detail="Subject not found")
+
+    # Audit log
+    system_service = SystemService(db)
+    await system_service.log_action(
+        admin_id=admin.id,
+        admin_email=admin.email or "",
+        action=AuditAction.UPDATE,
+        resource_type="subject",
+        resource_id=subject_id,
+        details={"updated_fields": list(updates.keys())}
+    )
+
     return result
 
 
@@ -89,11 +173,106 @@ async def delete_subject(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Delete (deactivate) a subject"""
+    """Soft delete (deactivate) a subject. Check dependencies first with GET /subjects/{id}/dependencies"""
     service = ContentManagementService(db)
+
+    # Check dependencies first
+    deps = await service.check_subject_dependencies(subject_id)
+    if not deps["can_delete"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete subject: {', '.join(deps['warnings'])}"
+        )
+
     if await service.delete_subject(subject_id):
-        return {"message": "Subject deactivated"}
+        # Audit log
+        system_service = SystemService(db)
+        await system_service.log_action(
+            admin_id=admin.id,
+            admin_email=admin.email or "",
+            action=AuditAction.DELETE,
+            resource_type="subject",
+            resource_id=subject_id,
+            details={"soft_delete": True}
+        )
+        return {"message": "Subject deactivated successfully"}
+
     raise HTTPException(status_code=404, detail="Subject not found")
+
+
+@router.post("/subjects/bulk", response_model=SubjectBulkActionResponse)
+async def bulk_subject_action(
+    data: SubjectBulkAction,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Perform bulk actions on multiple subjects.
+
+    Actions:
+    - activate: Activate multiple subjects
+    - deactivate: Deactivate multiple subjects
+    - delete: Soft delete multiple subjects (with dependency check)
+    """
+    service = ContentManagementService(db)
+    result = await service.bulk_subject_action(
+        subject_ids=data.subject_ids,
+        action=data.action,
+        admin_id=admin.id
+    )
+
+    # Audit log
+    system_service = SystemService(db)
+    await system_service.log_action(
+        admin_id=admin.id,
+        admin_email=admin.email or "",
+        action=AuditAction.UPDATE,
+        resource_type="subject_bulk",
+        resource_id=None,
+        details={
+            "action": data.action,
+            "subject_count": len(data.subject_ids),
+            "successful": result["successful"],
+            "failed": result["failed"]
+        }
+    )
+
+    return result
+
+
+@router.post("/subjects/export", response_model=SubjectExportResponse)
+async def export_subjects(
+    data: SubjectExportRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Export subjects to CSV or JSON format.
+
+    Options:
+    - Export all subjects or specific ones by ID
+    - Include related topics in export
+    """
+    service = ContentManagementService(db)
+    result = await service.export_subjects(
+        format=data.format.value,
+        subject_ids=data.subject_ids,
+        include_topics=data.include_topics,
+        include_questions=data.include_questions
+    )
+
+    # Audit log
+    system_service = SystemService(db)
+    await system_service.log_action(
+        admin_id=admin.id,
+        admin_email=admin.email or "",
+        action=AuditAction.EXPORT,
+        resource_type="subject",
+        resource_id=None,
+        details={"format": data.format.value, "count": result["record_count"]}
+    )
+
+    return result
 
 
 # ============================================================================
@@ -394,30 +573,63 @@ async def upload_document(
 ):
     """
     Upload a document for RAG ingestion.
-    
+
     Supported document types:
     - past_paper: Past examination papers
     - marking_scheme: Marking schemes
     - syllabus: ZIMSEC syllabi
     - textbook: Textbook content
     - teacher_notes: Teacher notes and guides
-    
+
     The document will be processed, chunked, and indexed into the vector store.
     """
-    content = await file.read()
-    
-    service = DocumentUploadService(db)
-    return await service.upload_document(
-        file_content=content,
-        filename=file.filename,
-        document_type=document_type,
-        uploaded_by=admin.id,
-        subject=subject,
-        grade=grade,
-        education_level=education_level,
-        year=year,
-        process_immediately=process_immediately
-    )
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Validate file exists
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        # Read file content
+        content = await file.read()
+
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="File is empty")
+
+        logger.info(f"Received document upload: {file.filename} ({len(content)} bytes) - type: {document_type}")
+
+        service = DocumentUploadService(db)
+        result = await service.upload_document(
+            file_content=content,
+            filename=file.filename,
+            document_type=document_type,
+            uploaded_by=admin.id,
+            subject=subject,
+            grade=grade,
+            education_level=education_level,
+            year=year,
+            process_immediately=process_immediately
+        )
+
+        if not result.get("success"):
+            logger.warning(f"Document upload failed: {result.get('error')}")
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "Upload failed")
+            )
+
+        logger.info(f"Document uploaded successfully: {result.get('document_id')}")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error during document upload: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process document: {str(e)}"
+        )
 
 
 @router.get("/documents")

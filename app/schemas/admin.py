@@ -313,22 +313,252 @@ class ConversationPipeline(BaseModel):
 # ============================================================================
 # Content Management Schemas
 # ============================================================================
+
+class EducationLevel(str, Enum):
+    """Education levels in Zimbabwe"""
+    PRIMARY = "primary"
+    SECONDARY = "secondary"  # O-Level
+    O_LEVEL = "o_level"
+    A_LEVEL = "a_level"
+    TERTIARY = "tertiary"
+
+
+class SubjectSortField(str, Enum):
+    """Fields available for sorting subjects"""
+    NAME = "name"
+    CODE = "code"
+    CREATED_AT = "created_at"
+    TOPIC_COUNT = "topic_count"
+    QUESTION_COUNT = "question_count"
+    EDUCATION_LEVEL = "education_level"
+
+
+class SortOrder(str, Enum):
+    """Sort order options"""
+    ASC = "asc"
+    DESC = "desc"
+
+
 class SubjectCreate(BaseModel):
-    """Create new subject"""
-    name: str = Field(..., min_length=2, max_length=100)
-    code: str = Field(..., min_length=2, max_length=20)
+    """Create new subject with comprehensive validation"""
+    name: str = Field(
+        ...,
+        min_length=2,
+        max_length=100,
+        description="Subject name (e.g., 'Mathematics', 'English Language')"
+    )
+    code: str = Field(
+        ...,
+        min_length=2,
+        max_length=20,
+        pattern=r"^[A-Z0-9\-]+$",
+        description="Unique subject code (e.g., 'MATH-001', 'ENG-O-LEVEL')"
+    )
+    education_level: str = Field(
+        ...,
+        description="Education level: primary, secondary, o_level, a_level"
+    )
+    description: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Detailed description of the subject"
+    )
+    icon: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Icon name or emoji for the subject"
+    )
+    color: Optional[str] = Field(
+        None,
+        pattern=r"^#[0-9A-Fa-f]{6}$",
+        description="Hex color code (e.g., '#3b82f6')"
+    )
+
+    @validator('code')
+    def uppercase_code(cls, v):
+        return v.upper() if v else v
+
+    @validator('education_level')
+    def validate_education_level(cls, v):
+        valid_levels = ['primary', 'secondary', 'o_level', 'a_level', 'tertiary']
+        if v.lower() not in valid_levels:
+            raise ValueError(f"Education level must be one of: {', '.join(valid_levels)}")
+        return v.lower()
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "Mathematics",
+                "code": "MATH-O-001",
+                "education_level": "o_level",
+                "description": "Core mathematics for O-Level students covering algebra, geometry, and statistics",
+                "icon": "calculate",
+                "color": "#3b82f6"
+            }
+        }
+
+
+class SubjectUpdate(BaseModel):
+    """Update subject with partial fields"""
+    name: Optional[str] = Field(None, min_length=2, max_length=100)
+    code: Optional[str] = Field(None, min_length=2, max_length=20, pattern=r"^[A-Z0-9\-]+$")
+    education_level: Optional[str] = None
+    description: Optional[str] = Field(None, max_length=1000)
+    icon: Optional[str] = Field(None, max_length=50)
+    color: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    is_active: Optional[bool] = None
+
+    @validator('code')
+    def uppercase_code(cls, v):
+        return v.upper() if v else v
+
+    @validator('education_level')
+    def validate_education_level(cls, v):
+        if v is None:
+            return v
+        valid_levels = ['primary', 'secondary', 'o_level', 'a_level', 'tertiary']
+        if v.lower() not in valid_levels:
+            raise ValueError(f"Education level must be one of: {', '.join(valid_levels)}")
+        return v.lower()
+
+
+class SubjectResponse(BaseModel):
+    """Subject response with full details"""
+    id: UUID
+    name: str
+    code: str
     education_level: str
     description: Optional[str] = None
     icon: Optional[str] = None
-    color: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    color: Optional[str] = None
+    is_active: bool
+    topic_count: int = 0
+    question_count: int = 0
+    document_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
-class SubjectUpdate(BaseModel):
-    """Update subject"""
-    name: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+
+class SubjectListResponse(BaseModel):
+    """Paginated subject list response"""
+    subjects: List[SubjectResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+
+
+class SubjectFilter(BaseModel):
+    """Subject filtering options"""
+    search: Optional[str] = Field(None, description="Search in name, code, description")
+    education_level: Optional[str] = None
+    is_active: Optional[bool] = None
+    has_topics: Optional[bool] = Field(None, description="Filter subjects with/without topics")
+    has_questions: Optional[bool] = Field(None, description="Filter subjects with/without questions")
+    created_after: Optional[date] = None
+    created_before: Optional[date] = None
+
+
+class SubjectBulkAction(BaseModel):
+    """Bulk action on multiple subjects"""
+    subject_ids: List[UUID] = Field(..., min_items=1, max_items=100)
+    action: str = Field(..., description="Action: activate, deactivate, delete")
+
+    @validator('action')
+    def validate_action(cls, v):
+        valid_actions = ['activate', 'deactivate', 'delete']
+        if v.lower() not in valid_actions:
+            raise ValueError(f"Action must be one of: {', '.join(valid_actions)}")
+        return v.lower()
+
+
+class SubjectBulkActionResponse(BaseModel):
+    """Response for bulk subject actions"""
+    total_requested: int
+    successful: int
+    failed: int
+    errors: List[Dict[str, str]] = []
+    message: str
+
+
+class SubjectStats(BaseModel):
+    """Subject statistics"""
+    total_subjects: int
+    active_subjects: int
+    inactive_subjects: int
+    by_education_level: Dict[str, int]
+    total_topics: int
+    total_questions: int
+    subjects_without_topics: int
+    subjects_without_questions: int
+    avg_topics_per_subject: float
+    avg_questions_per_subject: float
+    recently_created: int  # Last 30 days
+    most_popular: List[Dict[str, Any]]  # By question count
+
+
+class SubjectDetailResponse(BaseModel):
+    """Detailed subject response with related data"""
+    id: UUID
+    name: str
+    code: str
+    education_level: str
     description: Optional[str] = None
     icon: Optional[str] = None
     color: Optional[str] = None
-    is_active: Optional[bool] = None
+    is_active: bool
+    topic_count: int = 0
+    question_count: int = 0
+    document_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    # Additional details
+    topics: List[Dict[str, Any]] = []
+    coverage_percentage: float = 0.0
+    difficulty_distribution: Dict[str, int] = {}
+    recent_activity: List[Dict[str, Any]] = []
+
+
+class SubjectExportFormat(str, Enum):
+    """Export format options"""
+    CSV = "csv"
+    JSON = "json"
+    EXCEL = "excel"
+
+
+class SubjectExportRequest(BaseModel):
+    """Subject export request"""
+    format: SubjectExportFormat = SubjectExportFormat.CSV
+    subject_ids: Optional[List[UUID]] = Field(None, description="Specific subjects to export, None = all")
+    include_topics: bool = Field(False, description="Include related topics in export")
+    include_questions: bool = Field(False, description="Include question counts per topic")
+
+
+class SubjectExportResponse(BaseModel):
+    """Subject export response"""
+    filename: str
+    file_size: int
+    record_count: int
+    download_url: str
+    expires_at: datetime
+
+
+class SubjectDependencyWarning(BaseModel):
+    """Warning about subject dependencies before deletion"""
+    subject_id: UUID
+    subject_name: str
+    topic_count: int
+    question_count: int
+    document_count: int
+    active_students_count: int
+    can_delete: bool
+    warnings: List[str]
+
 
 class TopicCreate(BaseModel):
     """Create new topic"""

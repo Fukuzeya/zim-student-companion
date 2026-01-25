@@ -59,11 +59,12 @@ async def lifespan(app: FastAPI):
     from app.models.curriculum import Subject, Topic, LearningObjective, Question
     from app.models.practice import PracticeSession, QuestionAttempt
     from app.models.gamification import (
-        Achievement, StudentAchievement, StudentStreak, 
+        Achievement, StudentAchievement, StudentStreak,
         StudentTopicProgress, Competition, CompetitionParticipant
     )
     from app.models.payment import SubscriptionPlan, Payment
     from app.models.conversation import Conversation
+    from app.models.document import UploadedDocument, DocumentProcessingLog
     
     # ==================== Initialize Database ====================
     from app.core.database import engine, Base

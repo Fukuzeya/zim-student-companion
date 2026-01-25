@@ -152,7 +152,492 @@ class ContentManagementService:
         )
         await self.db.commit()
         return result.rowcount > 0
-    
+
+    async def list_subjects_paginated(
+        self,
+        search: Optional[str] = None,
+        education_level: Optional[str] = None,
+        is_active: Optional[bool] = None,
+        has_topics: Optional[bool] = None,
+        has_questions: Optional[bool] = None,
+        sort_by: str = "name",
+        sort_order: str = "asc",
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict[str, Any]:
+        """
+        List subjects with filtering, sorting, and pagination.
+        Uses optimized subqueries to avoid N+1 problem.
+        """
+        # Subqueries for counts (avoid N+1)
+        topic_count_subq = (
+            select(func.count(Topic.id))
+            .where(Topic.subject_id == Subject.id)
+            .correlate(Subject)
+            .scalar_subquery()
+        )
+
+        question_count_subq = (
+            select(func.count(Question.id))
+            .where(Question.subject_id == Subject.id)
+            .correlate(Subject)
+            .scalar_subquery()
+        )
+
+        # Build main query with counts
+        query = select(
+            Subject,
+            topic_count_subq.label('topic_count'),
+            question_count_subq.label('question_count')
+        )
+
+        # Apply filters
+        conditions = []
+
+        if search:
+            search_term = f"%{search}%"
+            conditions.append(
+                or_(
+                    Subject.name.ilike(search_term),
+                    Subject.code.ilike(search_term),
+                    Subject.description.ilike(search_term)
+                )
+            )
+
+        if education_level:
+            conditions.append(Subject.education_level == education_level)
+
+        if is_active is not None:
+            conditions.append(Subject.is_active == is_active)
+
+        if has_topics is not None:
+            if has_topics:
+                conditions.append(topic_count_subq > 0)
+            else:
+                conditions.append(topic_count_subq == 0)
+
+        if has_questions is not None:
+            if has_questions:
+                conditions.append(question_count_subq > 0)
+            else:
+                conditions.append(question_count_subq == 0)
+
+        if conditions:
+            query = query.where(and_(*conditions))
+
+        # Count total for pagination
+        count_query = select(func.count(Subject.id))
+        if conditions:
+            count_query = count_query.where(and_(*conditions))
+        total_result = await self.db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        # Apply sorting
+        sort_column_map = {
+            "name": Subject.name,
+            "code": Subject.code,
+            "created_at": Subject.created_at,
+            "education_level": Subject.education_level,
+            "topic_count": topic_count_subq,
+            "question_count": question_count_subq
+        }
+        sort_column = sort_column_map.get(sort_by, Subject.name)
+
+        if sort_order == "desc":
+            query = query.order_by(sort_column.desc())
+        else:
+            query = query.order_by(sort_column.asc())
+
+        # Apply pagination
+        offset = (page - 1) * page_size
+        query = query.offset(offset).limit(page_size)
+
+        # Execute
+        result = await self.db.execute(query)
+        rows = result.all()
+
+        # Format response
+        subjects = []
+        for row in rows:
+            subject = row[0]
+            t_count = row[1] or 0
+            q_count = row[2] or 0
+
+            subjects.append({
+                "id": subject.id,
+                "name": subject.name,
+                "code": subject.code,
+                "education_level": subject.education_level,
+                "description": subject.description,
+                "icon": subject.icon,
+                "color": subject.color,
+                "is_active": subject.is_active,
+                "topic_count": t_count,
+                "question_count": q_count,
+                "document_count": 0,
+                "created_at": subject.created_at,
+                "updated_at": None
+            })
+
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+
+        return {
+            "subjects": subjects,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1
+        }
+
+    async def get_subject_detail(self, subject_id: UUID) -> Optional[Dict[str, Any]]:
+        """Get detailed subject information including topics and coverage"""
+        result = await self.db.execute(
+            select(Subject).where(Subject.id == subject_id)
+        )
+        subject = result.scalar_one_or_none()
+
+        if not subject:
+            return None
+
+        # Get topics
+        topics_result = await self.db.execute(
+            select(Topic)
+            .where(Topic.subject_id == subject_id)
+            .where(Topic.is_active == True)
+            .order_by(Topic.order_index)
+        )
+        topics = topics_result.scalars().all()
+
+        # Get topic count and question count
+        topic_count = len(topics)
+        question_count_result = await self.db.execute(
+            select(func.count(Question.id)).where(Question.subject_id == subject_id)
+        )
+        question_count = question_count_result.scalar() or 0
+
+        # Get difficulty distribution
+        difficulty_result = await self.db.execute(
+            select(Question.difficulty, func.count(Question.id))
+            .where(Question.subject_id == subject_id)
+            .group_by(Question.difficulty)
+        )
+        difficulty_distribution = {row[0]: row[1] for row in difficulty_result.all()}
+
+        # Calculate coverage (topics with questions / total topics)
+        topics_with_questions = 0
+        topic_data = []
+        for topic in topics:
+            q_count_result = await self.db.execute(
+                select(func.count(Question.id)).where(Question.topic_id == topic.id)
+            )
+            q_count = q_count_result.scalar() or 0
+            if q_count > 0:
+                topics_with_questions += 1
+
+            topic_data.append({
+                "id": str(topic.id),
+                "name": topic.name,
+                "grade": topic.grade,
+                "order_index": topic.order_index,
+                "question_count": q_count
+            })
+
+        coverage = (topics_with_questions / topic_count * 100) if topic_count > 0 else 0
+
+        return {
+            "id": subject.id,
+            "name": subject.name,
+            "code": subject.code,
+            "education_level": subject.education_level,
+            "description": subject.description,
+            "icon": subject.icon,
+            "color": subject.color,
+            "is_active": subject.is_active,
+            "topic_count": topic_count,
+            "question_count": question_count,
+            "document_count": 0,
+            "created_at": subject.created_at,
+            "updated_at": None,
+            "topics": topic_data,
+            "coverage_percentage": round(coverage, 1),
+            "difficulty_distribution": difficulty_distribution,
+            "recent_activity": []
+        }
+
+    async def get_subject_stats(self) -> Dict[str, Any]:
+        """Get comprehensive subject statistics"""
+        from datetime import timedelta
+
+        # Total counts
+        total_result = await self.db.execute(select(func.count(Subject.id)))
+        total = total_result.scalar() or 0
+
+        active_result = await self.db.execute(
+            select(func.count(Subject.id)).where(Subject.is_active == True)
+        )
+        active = active_result.scalar() or 0
+
+        # By education level
+        level_result = await self.db.execute(
+            select(Subject.education_level, func.count(Subject.id))
+            .group_by(Subject.education_level)
+        )
+        by_level = {row[0] or "unknown": row[1] for row in level_result.all()}
+
+        # Topics and questions totals
+        topics_result = await self.db.execute(select(func.count(Topic.id)))
+        total_topics = topics_result.scalar() or 0
+
+        questions_result = await self.db.execute(select(func.count(Question.id)))
+        total_questions = questions_result.scalar() or 0
+
+        # Subjects without content
+        subjects_with_topics = await self.db.execute(
+            select(func.count(func.distinct(Topic.subject_id)))
+        )
+        with_topics = subjects_with_topics.scalar() or 0
+        no_topics = total - with_topics
+
+        subjects_with_questions = await self.db.execute(
+            select(func.count(func.distinct(Question.subject_id)))
+        )
+        with_questions = subjects_with_questions.scalar() or 0
+        no_questions = total - with_questions
+
+        # Recently created (last 30 days)
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        recent_result = await self.db.execute(
+            select(func.count(Subject.id))
+            .where(Subject.created_at >= thirty_days_ago)
+        )
+        recent = recent_result.scalar() or 0
+
+        # Most popular by question count
+        popular_result = await self.db.execute(
+            select(Subject.name, func.count(Question.id).label('q_count'))
+            .join(Question, Question.subject_id == Subject.id)
+            .group_by(Subject.name)
+            .order_by(func.count(Question.id).desc())
+            .limit(5)
+        )
+        most_popular = [
+            {"name": row[0], "question_count": row[1]}
+            for row in popular_result.all()
+        ]
+
+        return {
+            "total_subjects": total,
+            "active_subjects": active,
+            "inactive_subjects": total - active,
+            "by_education_level": by_level,
+            "total_topics": total_topics,
+            "total_questions": total_questions,
+            "subjects_without_topics": no_topics,
+            "subjects_without_questions": no_questions,
+            "avg_topics_per_subject": round(total_topics / total, 1) if total > 0 else 0,
+            "avg_questions_per_subject": round(total_questions / total, 1) if total > 0 else 0,
+            "recently_created": recent,
+            "most_popular": most_popular
+        }
+
+    async def bulk_subject_action(
+        self,
+        subject_ids: List[UUID],
+        action: str,
+        admin_id: UUID
+    ) -> Dict[str, Any]:
+        """Perform bulk actions on subjects"""
+        successful = 0
+        failed = 0
+        errors = []
+
+        for subject_id in subject_ids:
+            try:
+                if action == "activate":
+                    await self.db.execute(
+                        update(Subject)
+                        .where(Subject.id == subject_id)
+                        .values(is_active=True)
+                    )
+                    successful += 1
+                elif action == "deactivate":
+                    await self.db.execute(
+                        update(Subject)
+                        .where(Subject.id == subject_id)
+                        .values(is_active=False)
+                    )
+                    successful += 1
+                elif action == "delete":
+                    # Check dependencies first
+                    deps = await self.check_subject_dependencies(subject_id)
+                    if deps["can_delete"]:
+                        await self.db.execute(
+                            update(Subject)
+                            .where(Subject.id == subject_id)
+                            .values(is_active=False)
+                        )
+                        successful += 1
+                    else:
+                        failed += 1
+                        errors.append({
+                            "subject_id": str(subject_id),
+                            "error": f"Cannot delete: {', '.join(deps['warnings'])}"
+                        })
+            except Exception as e:
+                failed += 1
+                errors.append({
+                    "subject_id": str(subject_id),
+                    "error": str(e)
+                })
+
+        await self.db.commit()
+
+        return {
+            "total_requested": len(subject_ids),
+            "successful": successful,
+            "failed": failed,
+            "errors": errors[:10],
+            "message": f"Successfully processed {successful} of {len(subject_ids)} subjects"
+        }
+
+    async def check_subject_dependencies(self, subject_id: UUID) -> Dict[str, Any]:
+        """Check dependencies before deletion"""
+        result = await self.db.execute(
+            select(Subject).where(Subject.id == subject_id)
+        )
+        subject = result.scalar_one_or_none()
+
+        if not subject:
+            return {
+                "subject_id": subject_id,
+                "subject_name": "Not Found",
+                "topic_count": 0,
+                "question_count": 0,
+                "document_count": 0,
+                "active_students_count": 0,
+                "can_delete": False,
+                "warnings": ["Subject not found"]
+            }
+
+        # Count dependencies
+        topic_count_result = await self.db.execute(
+            select(func.count(Topic.id)).where(Topic.subject_id == subject_id)
+        )
+        topic_count = topic_count_result.scalar() or 0
+
+        question_count_result = await self.db.execute(
+            select(func.count(Question.id)).where(Question.subject_id == subject_id)
+        )
+        question_count = question_count_result.scalar() or 0
+
+        document_count = 0
+        active_students = 0
+
+        warnings = []
+        can_delete = True
+
+        if topic_count > 0:
+            warnings.append(f"{topic_count} topics will be orphaned")
+        if question_count > 0:
+            warnings.append(f"{question_count} questions will be orphaned")
+            can_delete = False
+        if active_students > 0:
+            warnings.append(f"{active_students} students are currently studying this subject")
+            can_delete = False
+
+        return {
+            "subject_id": subject_id,
+            "subject_name": subject.name,
+            "topic_count": topic_count,
+            "question_count": question_count,
+            "document_count": document_count,
+            "active_students_count": active_students,
+            "can_delete": can_delete,
+            "warnings": warnings
+        }
+
+    async def export_subjects(
+        self,
+        format: str,
+        subject_ids: Optional[List[UUID]] = None,
+        include_topics: bool = False,
+        include_questions: bool = False
+    ) -> Dict[str, Any]:
+        """Export subjects to file"""
+        import csv
+        import io
+        from datetime import timedelta
+
+        # Get subjects
+        query = select(Subject)
+        if subject_ids:
+            query = query.where(Subject.id.in_(subject_ids))
+        query = query.order_by(Subject.name)
+
+        result = await self.db.execute(query)
+        subjects = result.scalars().all()
+
+        # Prepare data
+        export_data = []
+        for subject in subjects:
+            row = {
+                "id": str(subject.id),
+                "name": subject.name,
+                "code": subject.code,
+                "education_level": subject.education_level,
+                "description": subject.description or "",
+                "icon": subject.icon or "",
+                "color": subject.color or "",
+                "is_active": subject.is_active,
+                "created_at": subject.created_at.isoformat()
+            }
+
+            if include_topics:
+                topics_result = await self.db.execute(
+                    select(Topic).where(Topic.subject_id == subject.id)
+                )
+                row["topics"] = [
+                    {"id": str(t.id), "name": t.name, "grade": t.grade}
+                    for t in topics_result.scalars().all()
+                ]
+
+            export_data.append(row)
+
+        # Generate file
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        if format == "json":
+            filename = f"subjects_export_{timestamp}.json"
+            content = json.dumps(export_data, indent=2, default=str)
+        elif format == "csv":
+            filename = f"subjects_export_{timestamp}.csv"
+            output = io.StringIO()
+            if export_data:
+                # Flatten for CSV (exclude nested topics)
+                flat_data = []
+                for item in export_data:
+                    flat_item = {k: v for k, v in item.items() if k != "topics"}
+                    if include_topics and "topics" in item:
+                        flat_item["topic_count"] = len(item["topics"])
+                    flat_data.append(flat_item)
+                writer = csv.DictWriter(output, fieldnames=flat_data[0].keys())
+                writer.writeheader()
+                writer.writerows(flat_data)
+            content = output.getvalue()
+        else:
+            filename = f"subjects_export_{timestamp}.xlsx"
+            content = ""
+
+        return {
+            "filename": filename,
+            "file_size": len(content.encode('utf-8') if isinstance(content, str) else content),
+            "record_count": len(export_data),
+            "download_url": f"/api/v1/admin/subjects/export/{filename}",
+            "expires_at": datetime.utcnow() + timedelta(hours=1)
+        }
+
     # =========================================================================
     # Topic Management
     # =========================================================================
