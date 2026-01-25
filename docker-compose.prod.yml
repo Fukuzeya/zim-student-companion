@@ -8,7 +8,7 @@ services:
   # 1. FastAPI Backend (The Application)
   # ----------------------------------------
   api:
-    image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
+    image: ghcr.io/${GITHUB_REPOSITORY}/api:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     
@@ -29,6 +29,18 @@ services:
       - redis
       - qdrant
       - celery_worker
+  
+  # ----------------------------------------
+  # 2. Angular Frontend (The UI)
+  # ----------------------------------------
+  frontend:
+    # Notice the '/frontend' added here
+    image: ghcr.io/${GITHUB_REPOSITORY}/frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    expose:
+      - 80
+    depends_on:
+      - api
       
   # ----------------------------------------
   # 2. Reverse Proxy (Public Gateway)
