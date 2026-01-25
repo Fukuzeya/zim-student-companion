@@ -13,7 +13,8 @@ import {
   ConversationPipeline,
   ConversationAnalytics,
   InterventionType,
-  ConversationSearchResult
+  ConversationSearchResult,
+  MessageRole
 } from '../../../core/models';
 
 @Component({
@@ -1521,7 +1522,7 @@ export class LiveConversationsComponent implements OnInit, OnDestroy {
             messages: [
               {
                 id: 'msg_001',
-                role: 'user',
+                role: MessageRole.USER,
                 content: 'Can you help me understand quadratic equations?',
                 context_type: 'question',
                 created_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
@@ -1529,7 +1530,7 @@ export class LiveConversationsComponent implements OnInit, OnDestroy {
               },
               {
                 id: 'msg_002',
-                role: 'assistant',
+                role: MessageRole.ASSISTANT,
                 content: 'Of course! A quadratic equation is an equation of the form ax² + bx + c = 0. Would you like me to explain how to solve them?',
                 context_type: 'explanation',
                 created_at: new Date(Date.now() - 9 * 60 * 1000).toISOString(),
@@ -1538,7 +1539,7 @@ export class LiveConversationsComponent implements OnInit, OnDestroy {
               },
               {
                 id: 'msg_003',
-                role: 'user',
+                role: MessageRole.USER,
                 content: 'Yes please! How do I use the quadratic formula?',
                 context_type: 'question',
                 created_at: new Date(Date.now() - 8 * 60 * 1000).toISOString(),
@@ -1546,7 +1547,7 @@ export class LiveConversationsComponent implements OnInit, OnDestroy {
               },
               {
                 id: 'msg_004',
-                role: 'assistant',
+                role: MessageRole.ASSISTANT,
                 content: 'The quadratic formula is x = (-b ± √(b²-4ac)) / 2a. Let me walk you through an example step by step...',
                 context_type: 'explanation',
                 created_at: new Date(Date.now() - 7 * 60 * 1000).toISOString(),
