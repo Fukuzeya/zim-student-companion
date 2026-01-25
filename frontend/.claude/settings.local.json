@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(npm run build:*)",
+      "Bash(powershell -Command \"\\(Get-Content ''src/app/layout/sidebar/sidebar.component.ts''\\) -replace ''/finance/payments'', ''/payments'' -replace ''/finance/subscriptions'', ''/payments/subscriptions'' -replace ''/finance/plans'', ''/payments/plans'' -replace ''routerLink=\"\"/settings\"\"'', ''routerLink=\"\"/system/settings\"\"'' -replace \"\"''/users/students''\"\", \"\"''/students''\"\" | Set-Content ''src/app/layout/sidebar/sidebar.component.ts''\")"
+    ]
+  }
+}
