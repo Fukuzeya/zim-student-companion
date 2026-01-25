@@ -445,10 +445,5 @@ try:
 except ImportError as e:
     logger.warning(f"⚠️ Could not import API router: {e}")
 
-# Include webhook router separately (if exists)
-try:
-    from app.api.v1.webhooks import router as webhook_router
-    app.include_router(webhook_router, prefix=settings.API_V1_PREFIX)
-    logger.info(f"✅ Webhook router mounted")
-except ImportError as e:
-    logger.debug(f"Webhook router not found: {e}")
+# Note: Webhook router is already included via api_router in router.py
+# No need to include it separately here
