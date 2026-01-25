@@ -7,7 +7,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: fukuzeya/zim-student-companion # Must be lowercase
+  # We use the base name here; suffixes like /api and /frontend are added in the build steps
+  IMAGE_BASE: fukuzeya/zim-student-companion 
   PYTHON_VERSION: '3.11'
 
 jobs:
@@ -102,55 +103,63 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov httpx aiosqlite
         
   # ============================================================================
-  # JOB 3: Build Docker Images
+  # JOB 3: Build Docker Images (Updated for Multi-Image)
   # ============================================================================
   build:
     name: 🐳 Build Docker Images
     runs-on: ubuntu-latest
-    # needs: test  <-- Uncomment this when you are ready to enforce tests
-    
     permissions:
       contents: read
       packages: write
-    
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
+      image_tag: ${{ steps.vars.outputs.sha_short }}
     
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
-      
-      # 👇 THIS IS THE MISSING STEP 👇
+
       - name: 🔧 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: 🔐 Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: 📋 Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=commit-
-            type=raw,value=latest,enable={{is_default_branch}}
-      
-      - name: 🏗️ Build and push Docker image
+
+      - name: 🏷️ Set Short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      # 🏗️ Build and Push BACKEND API
+      - name: 🏗️ Build Backend
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/api:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/api:commit-${{ steps.vars.outputs.sha_short }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 🏗️ Build and Push FRONTEND
+      - name: 🏗️ Build Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/frontend:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/frontend:commit-${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # ============================================================================
-  # JOB 4: Deploy to Production
+  # JOB 4: Deploy to Production (Updated for Multi-Image)
   # ============================================================================
   deploy:
     name: 🚀 Deploy to Production
@@ -162,7 +171,6 @@ jobs:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      # 1. Prepare SSH Access
       - name: 🔐 Set up SSH
         run: |
           mkdir -p ~/.ssh
@@ -170,100 +178,37 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.LINODE_HOST }} >> ~/.ssh/known_hosts
 
-      # 2. Transfer Configuration Files
       - name: 📤 Copy configs to server
         run: |
-          # Ensure directory exists
-          ssh -o StrictHostKeyChecking=no ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }} "mkdir -p /opt/zim-student-companion/nginx"
-          
-          # Copy docker-compose
-          scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/
-          
-          # Copy Nginx config
-          scp -o StrictHostKeyChecking=no nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
+          ssh ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }} "mkdir -p /opt/zim-student-companion/nginx"
+          scp docker-compose.prod.yml ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/
+          scp nginx/nginx.conf ${{ secrets.LINODE_USER }}@${{ secrets.LINODE_HOST }}:/opt/zim-student-companion/nginx/
 
-      # --- NEW STEP: Pre-process Tags Locally (FINAL, FINAL, FINAL VERSION) ---
-      - name: 🧼 Clean and Prepare Tag Variable
-        id: prepare_tag
-        shell: bash
-        env:
-          INPUT_TAGS: ${{ needs.build.outputs.image_tag }}
-        run: |
-          # 1. Use 'sed' to replace all commas and whitespace with a single space.
-          # We target the most common delimiters (comma, newline, space) and collapse them.
-          CLEAN_STRING=$(echo "$INPUT_TAGS" | sed -e 's/[,[:space:]]\+/ /g' | xargs)
-          
-          # 2. Use 'awk' to select the SECOND field ($2), which is the unique commit tag.
-          # The tags are typically ordered: [1]=latest, [2]=commit-hash.
-          COMMIT_TAG=$(echo "$CLEAN_STRING" | awk '{print $2}')
-          
-          # 3. Fallback: If no second tag exists (e.g., only 'latest' was built), use the first tag.
-          if [ -z "$COMMIT_TAG" ]; then
-              COMMIT_TAG=$(echo "$CLEAN_STRING" | awk '{print $1}')
-          fi
-
-          if [ -z "$COMMIT_TAG" ]; then
-              echo "Error: Final tag cleaning failed. The final tag could not be determined."
-              exit 1
-          fi
-          
-          echo "Clean Tag found: $COMMIT_TAG"
-          echo "CLEAN_TAG=$COMMIT_TAG" >> $GITHUB_OUTPUT
-
-      # --- MODIFIED STEP: Execute Deployment on Server ---
       - name: 🚀 Execute Deployment on Server
         env:
           HOST: ${{ secrets.LINODE_HOST }}
           USER: ${{ secrets.LINODE_USER }}
-          FULL_IMAGE_NAME: ${{ steps.prepare_tag.outputs.CLEAN_TAG }}
-          GITHUB_REPO: ${{ github.repository }}
+          IMAGE_TAG: commit-${{ needs.build.outputs.image_tag }}
+          GITHUB_REPO: fukuzeya/zim-student-companion
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          ACTOR: ${{ github.actor }}
         run: |
-          ssh -o StrictHostKeyChecking=no $USER@$HOST << ENDSSH 
-            set -e # Exit immediately if any command fails
-            
+          ssh $USER@$HOST << ENDSSH 
+            set -e
             cd /opt/zim-student-companion
             
-            echo "🔐 Logging into Registry..."
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u $ACTOR --password-stdin
             
-            echo "📥 Pulling image: $FULL_IMAGE_NAME"
-            docker pull "$FULL_IMAGE_NAME"
+            # Export vars for docker-compose to pick up
+            export GITHUB_REPOSITORY=$GITHUB_REPO
+            export IMAGE_TAG=$IMAGE_TAG
             
-            # --- FINAL TAG EXTRACTION FIX ---
-            # Extract the simple tag (e.g., 'commit-204d156')
-            SIMPLE_TAG="${FULL_IMAGE_NAME##*:}"
+            echo "📥 Pulling images for tag: \$IMAGE_TAG"
+            docker compose -f docker-compose.prod.yml pull
             
-            # --- EXPORT VARIABLES FOR DOCKER-COMPOSE ---
-            export GITHUB_REPOSITORY=fukuzeya/zim-student-companion
-            export IMAGE_TAG=$SIMPLE_TAG
-            
-            echo "🔄 Updating services with tag: $IMAGE_TAG"
-            
-            # --- DOCKER COMPOSE SYNTAX FIX ---
-            # Replace 'docker-compose' with 'docker compose' (with a space)
+            echo "🔄 Starting services..."
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             
-            echo "🧹 Cleaning up old images..."
-            docker image prune -af --filter "until=24h"
-            
-            echo "Deployment finished."
-          ENDSSH
-
-      - name: Deploy to Production
-        env:
-          SSH_HOST: ${{ secrets.LINODE_HOST }}
-          SSH_USER: ${{ secrets.LINODE_USER }}
-        run: |
-          ssh -o StrictHostKeyChecking=no $SSH_USER@$SSH_HOST << 'ENDSSH'
-            cd /opt/zim-student-companion
-            
-            # Set variables so Docker Compose works manually
-            export GITHUB_REPOSITORY="fukuzeya/zim-student-companion"
-            export IMAGE_TAG="latest"
-            
-            # Force the update
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --force-recreate
+            echo "🧹 Cleanup..."
             docker image prune -f
           ENDSSH
