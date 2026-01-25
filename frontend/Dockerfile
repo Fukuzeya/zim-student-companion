@@ -1,5 +1,6 @@
 # Stage 1: Build the Angular app
-FROM node:18-alpine AS build
+# Changed from node:18 to node:22
+FROM node:22-alpine AS build
 WORKDIR /app
 
 # Install dependencies
@@ -13,11 +14,10 @@ RUN npm run build --configuration=production
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
 
-# Note the path: dist/frontend/browser 
-# The application builder adds 'browser' to your defined outputPath
+# Use the path verified from your angular.json
 COPY --from=build /app/dist/frontend/browser /usr/share/nginx/html
 
-# Copy the local nginx config we created above
+# Copy the internal nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
