@@ -26,10 +26,10 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "zimsec_documents"
     
     # WhatsApp - Optional with empty defaults
-    WHATSAPP_TOKEN: str = ""
-    WHATSAPP_PHONE_NUMBER_ID: str = ""
-    WHATSAPP_VERIFY_TOKEN: str = "dev-verify-token"
-    WHATSAPP_API_URL: str = "https://graph.facebook.com/v18.0"
+    WHATSAPP_TOKEN: str = Field(..., env="WHATSAPP_TOKEN")
+    WHATSAPP_PHONE_NUMBER_ID: str = Field(..., env="WHATSAPP_PHONE_NUMBER_ID")
+    WHATSAPP_VERIFY_TOKEN: str = "RaphaelIsAwesome"
+    WHATSAPP_API_URL: str = "https://graph.facebook.com/v24.0"
     WHATSAPP_BUSINESS_ACCOUNT_ID: Optional[str] = Field(..., env="WHATSAPP_BUSINESS_ACCOUNT_ID")
     WHATSAPP_APP_SECRET : Optional[str] = Field(None, env="WHATSAPP_APP_SECRET")
     
