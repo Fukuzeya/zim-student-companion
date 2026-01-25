@@ -116,7 +116,7 @@ services:
   # 6. Celery Worker (Asynchronous Tasks)
   # ----------------------------------------
   celery_worker:
-    image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
+    image: ghcr.io/${GITHUB_REPOSITORY}/api:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
@@ -133,7 +133,7 @@ services:
   # 7. Celery Beat (Scheduler)
   # ----------------------------------------
   celery_beat:
-    image: ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG:-latest}
+    image: ghcr.io/${GITHUB_REPOSITORY}/api:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL}
