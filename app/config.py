@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Zim Student Companion"
     DEBUG: bool = True  # CHANGED: Default to True for development
     SECRET_KEY: str = "dev-secret-key-change-in-production"  # Default for dev
-    API_V1_PREFIX: str = "/api/v1"
+    API_V1_PREFIX: str = "/v1"
     
     # Database - with defaults for local Docker setup
     DATABASE_URL: str = "postgresql://postgres:12345@localhost:5432/zsc_db"
