@@ -106,29 +106,29 @@ def create_access_token(
     
     encoded_jwt = jwt.encode(
         to_encode,
-        settings.SECRET_KEY,
+        settings.JWT_SECRET_KEY,  # Use dedicated JWT secret
         algorithm=settings.JWT_ALGORITHM
     )
-    
+
     return encoded_jwt
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
     """
     Decode and validate a JWT access token.
-    
+
     Args:
         token: The JWT token string to decode
-        
+
     Returns:
         Dictionary of decoded claims
-        
+
     Raises:
         JWTError: If token is invalid or expired
     """
     payload = jwt.decode(
         token,
-        settings.SECRET_KEY,
+        settings.JWT_SECRET_KEY,  # Use dedicated JWT secret
         algorithms=[settings.JWT_ALGORITHM]
     )
     

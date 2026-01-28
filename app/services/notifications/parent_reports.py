@@ -99,9 +99,10 @@ class ParentReportService:
         accuracy = (correct_answers / total_questions * 100) if total_questions > 0 else 0
         
         # Get subject breakdown
+        from app.models.curriculum import Question
         subject_stats = {}
         for attempt in attempts:
-            question = await self.db.get(QuestionAttempt, attempt.question_id)
+            question = await self.db.get(Question, attempt.question_id)
             if question and question.subject_id:
                 subj_id = str(question.subject_id)
                 if subj_id not in subject_stats:

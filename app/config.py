@@ -1,6 +1,7 @@
 import secrets
+import hashlib
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from functools import lru_cache
 from typing import Optional
 
@@ -45,16 +46,52 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30  # 30 minutes
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7 days
     # Secret key for JWT signing (generate with: openssl rand -hex 32)
-    JWT_SECRET_KEY: str = Field(
-        default_factory=lambda: secrets.token_hex(32),
-        description="Secret key for JWT access tokens"
+    # If not set, will be derived from SECRET_KEY for consistency across restarts
+    JWT_SECRET_KEY: Optional[str] = Field(
+        default=None,
+        description="Secret key for JWT access tokens. If not set, derived from SECRET_KEY."
     )
-    
+
     # Separate secret for refresh tokens (additional security layer)
-    REFRESH_SECRET_KEY: str = Field(
-        default_factory=lambda: secrets.token_hex(32),
-        description="Secret key for JWT refresh tokens"
+    # If not set, will be derived from SECRET_KEY for consistency across restarts
+    REFRESH_SECRET_KEY: Optional[str] = Field(
+        default=None,
+        description="Secret key for JWT refresh tokens. If not set, derived from SECRET_KEY."
     )
+
+    @model_validator(mode='after')
+    def derive_jwt_secrets(self) -> 'Settings':
+        """
+        Derive JWT secrets from SECRET_KEY if not explicitly set.
+        This ensures tokens remain valid across application restarts.
+
+        IMPORTANT: In production, set SECRET_KEY to a strong random value in .env
+        Generate with: openssl rand -hex 32
+        """
+        if not self.JWT_SECRET_KEY:
+            # Derive JWT secret from SECRET_KEY using HMAC-SHA256
+            self.JWT_SECRET_KEY = hashlib.sha256(
+                f"{self.SECRET_KEY}:jwt:access".encode()
+            ).hexdigest()
+
+        if not self.REFRESH_SECRET_KEY:
+            # Derive refresh secret from SECRET_KEY using HMAC-SHA256
+            self.REFRESH_SECRET_KEY = hashlib.sha256(
+                f"{self.SECRET_KEY}:jwt:refresh".encode()
+            ).hexdigest()
+
+        # Warn if using default SECRET_KEY in non-debug mode
+        if not self.DEBUG and self.SECRET_KEY == "dev-secret-key-change-in-production":
+            import warnings
+            warnings.warn(
+                "WARNING: Using default SECRET_KEY in production! "
+                "Set a secure SECRET_KEY in your .env file. "
+                "Generate one with: openssl rand -hex 32",
+                UserWarning
+            )
+
+        return self
+
     # Password requirements
     MIN_PASSWORD_LENGTH: int = 8
     

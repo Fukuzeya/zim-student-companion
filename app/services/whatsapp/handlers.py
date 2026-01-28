@@ -10,18 +10,25 @@ Key improvements:
 - Conversation caching for faster history retrieval
 - Subject/topic detection for better context
 - Enhanced error handling and user feedback
+- Full menu item routing for interactive buttons/lists
+- Real progress stats from database
+- Parent report integration
 """
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, desc, Integer
 import logging
 import uuid
-from datetime import datetime
+import random
+import string
+from datetime import datetime, date, timedelta
 
 from app.services.whatsapp.client import WhatsAppClient, WhatsAppMessage
 from app.services.whatsapp.flows import ConversationFlow, FlowState
-from app.models.user import User, Student
+from app.models.user import User, Student, ParentStudentLink, UserRole
 from app.models.conversation import Conversation
+from app.models.practice import PracticeSession, QuestionAttempt
+from app.models.gamification import StudentStreak, StudentAchievement, Achievement
 from app.core.redis import cache
 
 # Import from updated RAG pipeline
@@ -35,6 +42,10 @@ from app.services.rag import (
     record_rag_query,
     get_metrics_collector,
 )
+
+# Import services for real stats
+from app.services.gamification.xp_system import XPSystem
+from app.services.notifications.parent_reports import ParentReportService
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +65,28 @@ class Commands:
     UPGRADE = {"upgrade", "premium", "subscribe", "plan", "plans"}
     PROGRESS = {"progress", "stats", "score", "performance"}
     SUBJECT = {"subject", "change subject", "switch subject"}
+    ACHIEVEMENTS = {"achievements", "badges", "trophies"}
+    LEADERBOARD = {"leaderboard", "ranking", "rankings", "top"}
+    PARENT_CODE = {"parent code", "parentcode", "link parent", "parent link"}
+    REPORT = {"report", "reports", "my report"}
+
+    # Menu item IDs (from interactive buttons/lists)
+    MENU_ITEMS = {
+        # Student menu items
+        "menu_practice", "menu_ask", "menu_quiz",
+        "menu_progress", "menu_compete", "menu_achievements",
+        "menu_parent_code", "menu_subscription", "menu_settings",
+        # Parent menu items
+        "parent_daily", "parent_weekly", "parent_subjects",
+        "parent_notifications", "parent_subscription",
+        # Notification toggles
+        "notif_enable", "notif_disable",
+        # Settings items
+        "setting_subject", "setting_name", "setting_grade"
+    }
+
+    # Dynamic menu items that need pattern matching
+    DYNAMIC_PREFIXES = {"quiz_"}
 
 
 # ============================================================================
@@ -122,11 +155,17 @@ class MessageHandler:
         try:
             # Mark as read immediately
             await self.wa.mark_as_read(message.message_id)
-            
+
             # Get or create user
-            user = await self._get_or_create_user(phone)
+            user, is_first_message_today = await self._get_or_create_user(phone)
             if not user:
                 return  # Onboarding started
+
+            # Send welcome back message for returning users (first message of the day)
+            if is_first_message_today and user.role == UserRole.STUDENT:
+                student = await self._get_student(user.id)
+                if student:
+                    await self._send_welcome_back(phone, user, student)
             
             # Get current flow state
             state = await self._get_flow_state(phone)
@@ -163,7 +202,7 @@ class MessageHandler:
             get_metrics_collector().record_error()
     
     # ==================== Command Handling ====================
-    
+
     async def _handle_commands(
         self,
         phone: str,
@@ -172,35 +211,168 @@ class MessageHandler:
         state: Optional[FlowState]
     ) -> bool:
         """
-        Handle global commands. Returns True if command was handled.
+        Handle global commands and menu item callbacks. Returns True if command was handled.
         """
         text_lower = text.lower().strip()
-        
+
+        # ===== Menu Item Callbacks (from interactive buttons/lists) =====
+        if text_lower in Commands.MENU_ITEMS:
+            return await self._handle_menu_item(phone, text_lower, user)
+
+        # Check for dynamic menu items (like quiz_mathematics)
+        for prefix in Commands.DYNAMIC_PREFIXES:
+            if text_lower.startswith(prefix):
+                return await self._handle_menu_item(phone, text_lower, user)
+
+        # ===== Text Commands =====
+
         # Menu/Help
         if text_lower in Commands.MENU:
             await self.flow.show_main_menu(phone, user)
             return True
-        
+
         # Upgrade
         if text_lower in Commands.UPGRADE:
             await self._show_upgrade_options(phone, user)
             return True
-        
+
         # Progress
         if text_lower in Commands.PROGRESS:
             await self._show_progress(phone, user)
             return True
-        
+
         # Subject change
         if text_lower in Commands.SUBJECT:
             await self._start_subject_selection(phone, user)
             return True
-        
+
+        # Achievements
+        if text_lower in Commands.ACHIEVEMENTS:
+            await self._show_achievements(phone, user)
+            return True
+
+        # Leaderboard
+        if text_lower in Commands.LEADERBOARD:
+            await self._show_leaderboard(phone, user)
+            return True
+
+        # Parent code generation
+        if text_lower in Commands.PARENT_CODE:
+            await self._generate_parent_code(phone, user)
+            return True
+
+        # Report (for parents)
+        if text_lower in Commands.REPORT:
+            await self._show_report(phone, user)
+            return True
+
         # Start practice (when not in practice flow)
         if text_lower in Commands.PRACTICE and (not state or state.flow_name != "practice"):
             await self._start_practice_session(phone, user)
             return True
-        
+
+        return False
+
+    async def _handle_menu_item(self, phone: str, menu_id: str, user: User) -> bool:
+        """
+        Handle menu item callbacks from interactive buttons/lists.
+        Routes menu_* and parent_* IDs to appropriate handlers.
+        """
+        # Student menu items
+        if menu_id == "menu_practice":
+            await self._start_practice_session(phone, user)
+            return True
+
+        elif menu_id == "menu_ask":
+            await self.wa.send_text(
+                phone,
+                "❓ *Ask me anything!*\n\n"
+                "Just type your question and I'll help you understand.\n\n"
+                "Examples:\n"
+                "• Explain photosynthesis\n"
+                "• How do I solve quadratic equations?\n"
+                "• What caused World War 1?\n"
+                "• Calculate the area of a circle with radius 5cm"
+            )
+            return True
+
+        elif menu_id == "menu_quiz":
+            await self._start_quick_quiz(phone, user)
+            return True
+
+        elif menu_id == "menu_progress":
+            await self._show_progress(phone, user)
+            return True
+
+        elif menu_id == "menu_compete":
+            await self._show_competitions(phone, user)
+            return True
+
+        elif menu_id == "menu_achievements":
+            await self._show_achievements(phone, user)
+            return True
+
+        elif menu_id == "menu_parent_code":
+            await self._generate_parent_code(phone, user)
+            return True
+
+        elif menu_id == "menu_subscription":
+            await self._show_upgrade_options(phone, user)
+            return True
+
+        elif menu_id == "menu_settings":
+            await self._show_settings(phone, user)
+            return True
+
+        # Parent menu items
+        elif menu_id == "parent_daily":
+            await self._show_parent_daily_report(phone, user)
+            return True
+
+        elif menu_id == "parent_weekly":
+            await self._show_parent_weekly_report(phone, user)
+            return True
+
+        elif menu_id == "parent_subjects":
+            await self._show_parent_subject_breakdown(phone, user)
+            return True
+
+        elif menu_id == "parent_notifications":
+            await self._show_parent_notification_settings(phone, user)
+            return True
+
+        elif menu_id == "parent_subscription":
+            await self._show_upgrade_options(phone, user)
+            return True
+
+        # Notification toggles
+        elif menu_id == "notif_enable":
+            await self._toggle_notifications(phone, user, enable=True)
+            return True
+
+        elif menu_id == "notif_disable":
+            await self._toggle_notifications(phone, user, enable=False)
+            return True
+
+        # Settings items
+        elif menu_id == "setting_subject":
+            await self._start_subject_selection(phone, user)
+            return True
+
+        elif menu_id == "setting_name":
+            await self._start_name_change(phone, user)
+            return True
+
+        elif menu_id == "setting_grade":
+            await self._start_grade_change(phone, user)
+            return True
+
+        # Dynamic quiz subject selection
+        elif menu_id.startswith("quiz_"):
+            subject = menu_id.replace("quiz_", "").title()
+            await self._start_quiz_with_subject(phone, user, subject)
+            return True
+
         return False
     
     # ==================== Flow Routing ====================
@@ -226,7 +398,10 @@ class MessageHandler:
         
         elif state.flow_name == "subject_selection":
             await self._handle_subject_selection(phone, text, user, state)
-        
+
+        elif state.flow_name == "settings":
+            await self._handle_settings_flow(phone, text, user, state)
+
         else:
             # Unknown state, clear and handle as general query
             await cache.delete(f"flow_state:{phone}")
@@ -544,18 +719,37 @@ class MessageHandler:
     
     # ==================== Helper Methods ====================
     
-    async def _get_or_create_user(self, phone: str) -> Optional[User]:
-        """Get existing user or start onboarding"""
+    async def _get_or_create_user(self, phone: str) -> Tuple[Optional[User], bool]:
+        """
+        Get existing user or start onboarding.
+        Returns (user, is_returning_today) tuple.
+        is_returning_today is True if this is the first message of the day.
+        """
         result = await self.db.execute(
             select(User).where(User.phone_number == phone)
         )
         user = result.scalar_one_or_none()
-        
+
         if not user:
             await self.flow.start_onboarding(phone)
-            return None
-        
-        return user
+            return None, False
+
+        # Check if this is the first message today (for welcome back)
+        welcome_key = f"welcomed_today:{phone}"
+        already_welcomed = await cache.get(welcome_key)
+
+        if not already_welcomed:
+            # Mark as welcomed for today (expires at midnight)
+            await cache.set(welcome_key, "1", ttl=self._seconds_until_midnight())
+            return user, True  # First message today
+
+        return user, False
+
+    def _seconds_until_midnight(self) -> int:
+        """Calculate seconds until midnight for cache TTL"""
+        now = datetime.now()
+        midnight = datetime(now.year, now.month, now.day) + timedelta(days=1)
+        return int((midnight - now).total_seconds())
     
     async def _get_student(self, user_id: str) -> Optional[Student]:
         """Get student profile"""
@@ -706,22 +900,108 @@ class MessageHandler:
         )
     
     async def _show_progress(self, phone: str, user: User) -> None:
-        """Show user's learning progress"""
+        """Show user's learning progress with real data from database"""
         student = await self._get_student(user.id)
         if not student:
             await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
             return
-        
-        # TODO: Get actual stats from database
-        await self.wa.send_text(
-            phone,
-            f"📊 *Your Progress, {student.first_name}*\n\n"
-            f"🔥 Current streak: 5 days\n"
-            f"📝 Questions answered: 127\n"
-            f"✅ Accuracy: 78%\n"
-            f"⭐ XP earned: 2,450\n\n"
-            f"Keep up the great work! 🌟"
+
+        # Get real stats from XP system
+        xp_system = XPSystem(self.db)
+        stats = await xp_system.get_student_stats(student.id)
+
+        # Get practice stats
+        practice_stats = await self._get_practice_stats(student.id)
+
+        # Build progress message with real data
+        level_info = xp_system.get_level_info(student.total_xp or 0)
+
+        # Progress bar for level
+        progress_pct = level_info.get("progress_percent", 0)
+        filled = int(progress_pct / 10)
+        progress_bar = "█" * filled + "░" * (10 - filled)
+
+        message = f"""📊 *Your Progress, {student.first_name}!*
+
+━━━━━━━━━━━━━━━━━━━━━
+🎮 *Level & XP*
+━━━━━━━━━━━━━━━━━━━━━
+⭐ Level {level_info['level']}: {level_info['title']}
+💎 Total XP: {student.total_xp or 0:,}
+📈 Progress: [{progress_bar}] {progress_pct:.0f}%
+   {level_info['xp_in_level']}/{level_info['xp_for_next_level']} XP to next level
+
+━━━━━━━━━━━━━━━━━━━━━
+🔥 *Streaks*
+━━━━━━━━━━━━━━━━━━━━━
+🔥 Current streak: {stats.get('current_streak', 0)} days
+🏆 Longest streak: {stats.get('longest_streak', 0)} days
+📅 Total active days: {stats.get('total_active_days', 0)}
+
+━━━━━━━━━━━━━━━━━━━━━
+📝 *Practice Stats*
+━━━━━━━━━━━━━━━━━━━━━
+📚 Questions answered: {practice_stats['total_questions']:,}
+✅ Correct answers: {practice_stats['correct_answers']:,}
+📈 Accuracy: {practice_stats['accuracy']:.1f}%
+🎯 Sessions completed: {practice_stats['sessions_completed']}
+
+━━━━━━━━━━━━━━━━━━━━━
+{self._get_encouragement_message(practice_stats['accuracy'], stats.get('current_streak', 0))}
+"""
+        await self.wa.send_text(phone, message)
+
+    async def _get_practice_stats(self, student_id) -> Dict[str, Any]:
+        """Get comprehensive practice statistics for a student"""
+        # Total questions attempted
+        result = await self.db.execute(
+            select(func.count(QuestionAttempt.id))
+            .where(QuestionAttempt.student_id == student_id)
+            .where(QuestionAttempt.student_answer != "[SKIPPED]")
         )
+        total_questions = result.scalar() or 0
+
+        # Correct answers
+        result = await self.db.execute(
+            select(func.count(QuestionAttempt.id))
+            .where(QuestionAttempt.student_id == student_id)
+            .where(QuestionAttempt.is_correct == True)
+        )
+        correct_answers = result.scalar() or 0
+
+        # Sessions completed
+        result = await self.db.execute(
+            select(func.count(PracticeSession.id))
+            .where(PracticeSession.student_id == student_id)
+            .where(PracticeSession.status == "completed")
+        )
+        sessions_completed = result.scalar() or 0
+
+        accuracy = (correct_answers / total_questions * 100) if total_questions > 0 else 0
+
+        return {
+            "total_questions": total_questions,
+            "correct_answers": correct_answers,
+            "accuracy": accuracy,
+            "sessions_completed": sessions_completed
+        }
+
+    def _get_encouragement_message(self, accuracy: float, streak: int) -> str:
+        """Generate personalized encouragement message"""
+        if streak >= 30:
+            return "🏆 *AMAZING!* 30+ day streak! You're a true champion! 🌟"
+        elif streak >= 14:
+            return "🔥 *Incredible!* Two weeks strong! Keep the momentum! 💪"
+        elif streak >= 7:
+            return "⭐ *Fantastic!* A whole week of learning! You're on fire! 🔥"
+        elif accuracy >= 90:
+            return "🌟 *Outstanding accuracy!* You're mastering this! 🎯"
+        elif accuracy >= 75:
+            return "👏 *Great work!* Keep practicing to reach excellence! 📚"
+        elif accuracy >= 50:
+            return "💪 *Good progress!* Every question makes you stronger! 📈"
+        else:
+            return "🚀 *Keep going!* Practice makes perfect! You've got this! 💪"
     
     async def _start_subject_selection(self, phone: str, user: User) -> None:
         """Start subject selection flow"""
@@ -757,9 +1037,9 @@ class MessageHandler:
             "mathematics", "english", "physics", "chemistry",
             "biology", "geography", "history", "commerce", "accounting"
         ]
-        
+
         text_lower = text.lower().strip()
-        
+
         if text_lower in subjects:
             # Update student's current subject
             student = await self._get_student(user.id)
@@ -769,7 +1049,7 @@ class MessageHandler:
                     student.subjects.remove(text_lower.title())
                 student.subjects.insert(0, text_lower.title())
                 await self.db.commit()
-            
+
             await cache.delete(f"flow_state:{phone}")
             await self.wa.send_text(
                 phone,
@@ -782,4 +1062,821 @@ class MessageHandler:
                 phone,
                 f"I don't recognize '{text}' as a subject. "
                 f"Please choose from the list above, or type 'menu' to go back."
+            )
+
+    # ==================== Achievement & Leaderboard Handlers ====================
+
+    async def _show_achievements(self, phone: str, user: User) -> None:
+        """Show student's earned achievements"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Get earned achievements
+        result = await self.db.execute(
+            select(Achievement, StudentAchievement.earned_at)
+            .join(StudentAchievement, Achievement.id == StudentAchievement.achievement_id)
+            .where(StudentAchievement.student_id == student.id)
+            .order_by(StudentAchievement.earned_at.desc())
+            .limit(10)
+        )
+        achievements = result.all()
+
+        if not achievements:
+            await self.wa.send_text(
+                phone,
+                "🎖️ *Your Achievements*\n\n"
+                "You haven't earned any badges yet!\n\n"
+                "Keep practicing to unlock achievements:\n"
+                "• 🔥 First Flame - 3 day streak\n"
+                "• 📚 Bookworm - Answer 50 questions\n"
+                "• 🎯 Sharp Shooter - 90% accuracy in a session\n"
+                "• 🏆 Champion - Win a competition\n\n"
+                "Type *practice* to start earning! 💪"
+            )
+            return
+
+        # Build achievements message
+        achievements_text = ""
+        for achievement, earned_at in achievements:
+            icon = achievement.icon or "🏅"
+            earned_date = earned_at.strftime("%b %d")
+            achievements_text += f"{icon} *{achievement.name}*\n"
+            achievements_text += f"   {achievement.description}\n"
+            achievements_text += f"   Earned: {earned_date}\n\n"
+
+        # Count total achievements
+        total_result = await self.db.execute(
+            select(func.count(StudentAchievement.id))
+            .where(StudentAchievement.student_id == student.id)
+        )
+        total_earned = total_result.scalar() or 0
+
+        # Get total possible achievements
+        total_possible_result = await self.db.execute(select(func.count(Achievement.id)))
+        total_possible = total_possible_result.scalar() or 0
+
+        message = f"""🎖️ *Your Achievements*
+
+You've earned *{total_earned}/{total_possible}* badges! 🌟
+
+━━━━━━━━━━━━━━━━━━━━━
+{achievements_text}
+━━━━━━━━━━━━━━━━━━━━━
+Keep practicing to unlock more! 💪
+"""
+        await self.wa.send_text(phone, message)
+
+    async def _show_leaderboard(self, phone: str, user: User) -> None:
+        """Show leaderboard rankings"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Get top 10 students by XP
+        result = await self.db.execute(
+            select(Student)
+            .where(Student.total_xp > 0)
+            .order_by(desc(Student.total_xp))
+            .limit(10)
+        )
+        top_students = result.scalars().all()
+
+        # Find current student's rank
+        rank_result = await self.db.execute(
+            select(func.count(Student.id))
+            .where(Student.total_xp > (student.total_xp or 0))
+        )
+        user_rank = (rank_result.scalar() or 0) + 1
+
+        # Build leaderboard
+        leaderboard_text = ""
+        medals = ["🥇", "🥈", "🥉"]
+
+        for i, s in enumerate(top_students):
+            rank = i + 1
+            medal = medals[i] if i < 3 else f"{rank}."
+            name = s.first_name[:12]  # Truncate long names
+            is_you = " ← You!" if s.id == student.id else ""
+
+            if rank <= 3:
+                leaderboard_text += f"{medal} *{name}* - {s.total_xp or 0:,} XP{is_you}\n"
+            else:
+                leaderboard_text += f"{medal} {name} - {s.total_xp or 0:,} XP{is_you}\n"
+
+        # Add user's position if not in top 10
+        user_in_top = any(s.id == student.id for s in top_students)
+
+        message = f"""🏆 *Leaderboard - Top Students*
+
+━━━━━━━━━━━━━━━━━━━━━
+{leaderboard_text}
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        if not user_in_top:
+            message += f"\n📍 *Your Rank:* #{user_rank} with {student.total_xp or 0:,} XP\n"
+            message += f"   Keep practicing to climb higher! 📈\n"
+
+        message += "\n💡 Earn XP by answering questions correctly!"
+
+        await self.wa.send_text(phone, message)
+
+    # ==================== Parent Code Generation ====================
+
+    async def _generate_parent_code(self, phone: str, user: User) -> None:
+        """Generate a 6-digit code for parent linking"""
+        if user.role != UserRole.STUDENT:
+            await self.wa.send_text(
+                phone,
+                "This feature is only for students.\n\n"
+                "If you're a parent, ask your child for their parent code!"
+            )
+            return
+
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Check for existing unexpired code
+        result = await self.db.execute(
+            select(ParentStudentLink)
+            .where(ParentStudentLink.student_id == student.id)
+            .where(ParentStudentLink.verified == False)
+            .where(ParentStudentLink.created_at > datetime.utcnow() - timedelta(hours=24))
+        )
+        existing_link = result.scalar_one_or_none()
+
+        if existing_link:
+            code = existing_link.verification_code
+        else:
+            # Generate new 6-digit code
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+            # Create new link record
+            new_link = ParentStudentLink(
+                student_id=student.id,
+                verification_code=code,
+                verified=False
+            )
+            self.db.add(new_link)
+            await self.db.commit()
+
+        await self.wa.send_text(
+            phone,
+            f"👨‍👩‍👧 *Parent Linking Code*\n\n"
+            f"Share this code with your parent:\n\n"
+            f"🔑 *{code}*\n\n"
+            f"Instructions for your parent:\n"
+            f"1. Save this number to contacts\n"
+            f"2. Send a message saying 'Hi'\n"
+            f"3. Select 'I'm a Parent'\n"
+            f"4. Enter the code above\n\n"
+            f"⏰ This code expires in 24 hours.\n"
+            f"🔒 Only share with your parent/guardian!"
+        )
+
+    # ==================== Parent Report Handlers ====================
+
+    async def _show_report(self, phone: str, user: User) -> None:
+        """Show report - routes to appropriate report based on user role"""
+        if user.role == UserRole.PARENT:
+            await self._show_parent_weekly_report(phone, user)
+        else:
+            await self._show_progress(phone, user)
+
+    async def _get_linked_student(self, parent_user_id) -> Optional[Student]:
+        """Get the student linked to a parent"""
+        result = await self.db.execute(
+            select(Student)
+            .join(ParentStudentLink, ParentStudentLink.student_id == Student.id)
+            .where(ParentStudentLink.parent_user_id == parent_user_id)
+            .where(ParentStudentLink.verified == True)
+        )
+        return result.scalar_one_or_none()
+
+    async def _show_parent_daily_report(self, phone: str, user: User) -> None:
+        """Show parent's daily report for their child"""
+        if user.role != UserRole.PARENT:
+            await self.wa.send_text(phone, "This feature is only for parents.")
+            return
+
+        student = await self._get_linked_student(user.id)
+        if not student:
+            await self.wa.send_text(
+                phone,
+                "You haven't linked to a student account yet.\n\n"
+                "Ask your child for their 6-digit parent code, "
+                "then send it here to link accounts."
+            )
+            return
+
+        # Generate daily report
+        report_service = ParentReportService(self.db)
+        report = await report_service.generate_report(student.id, "daily")
+
+        if "error" in report:
+            await self.wa.send_text(phone, f"Sorry, couldn't generate report: {report['error']}")
+            return
+
+        summary = report.get("summary", {})
+
+        message = f"""📊 *Daily Report for {student.first_name}*
+
+📅 {report.get('date', 'Today')}
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 *Today's Activity*
+━━━━━━━━━━━━━━━━━━━━━
+📝 Questions attempted: {summary.get('questions_attempted', 0)}
+✅ Correct answers: {summary.get('correct_answers', 0)}
+📊 Accuracy: {summary.get('accuracy_percentage', 0):.1f}%
+⏱️ Time spent: {summary.get('time_spent_minutes', 0)} minutes
+🔥 Current streak: {summary.get('current_streak', 0)} days
+
+━━━━━━━━━━━━━━━━━━━━━
+{report.get('status', '')}
+
+{report.get('message', '')}
+"""
+        await self.wa.send_text(phone, message)
+
+    async def _show_parent_weekly_report(self, phone: str, user: User) -> None:
+        """Show parent's weekly report for their child"""
+        if user.role != UserRole.PARENT:
+            await self.wa.send_text(phone, "This feature is only for parents.")
+            return
+
+        student = await self._get_linked_student(user.id)
+        if not student:
+            await self.wa.send_text(
+                phone,
+                "You haven't linked to a student account yet.\n\n"
+                "Ask your child for their 6-digit parent code, "
+                "then send it here to link accounts."
+            )
+            return
+
+        # Generate weekly report
+        report_service = ParentReportService(self.db)
+        report = await report_service.generate_report(student.id, "weekly")
+
+        if "error" in report:
+            await self.wa.send_text(phone, f"Sorry, couldn't generate report: {report['error']}")
+            return
+
+        summary = report.get("summary", {})
+        strongest = report.get("strongest_area", {})
+        weakest = report.get("needs_attention", {})
+        comparison = report.get("comparison", {})
+        recommendations = report.get("recommendations", [])
+
+        # Build recommendations text
+        rec_text = ""
+        for i, rec in enumerate(recommendations[:3], 1):
+            rec_text += f"{i}. {rec}\n"
+
+        if not rec_text:
+            rec_text = "Keep up the great work! 🌟"
+
+        # Calculate trend emoji
+        change = comparison.get("change_percentage", 0)
+        trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+
+        message = f"""📊 *Weekly Report for {student.first_name}*
+
+📅 {report.get('week_start', '')} - {report.get('week_end', '')}
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 *Summary*
+━━━━━━━━━━━━━━━━━━━━━
+📝 Total questions: {summary.get('total_questions', 0)}
+✅ Correct: {summary.get('correct_answers', 0)}
+📊 Accuracy: {summary.get('accuracy_percentage', 0):.1f}%
+📅 Active days: {summary.get('active_days', 0)}/7
+🔥 Current streak: {summary.get('current_streak', 0)} days
+
+━━━━━━━━━━━━━━━━━━━━━
+💪 *Strongest Area*
+━━━━━━━━━━━━━━━━━━━━━
+{strongest.get('topic', 'N/A')} ({strongest.get('mastery', 0):.0f}% mastery)
+
+━━━━━━━━━━━━━━━━━━━━━
+📚 *Needs Practice*
+━━━━━━━━━━━━━━━━━━━━━
+{weakest.get('topic', 'N/A')} ({weakest.get('mastery', 0):.0f}% mastery)
+
+━━━━━━━━━━━━━━━━━━━━━
+{trend_emoji} *vs Last Week*
+━━━━━━━━━━━━━━━━━━━━━
+{comparison.get('previous_week_questions', 0)} → {comparison.get('current_week_questions', 0)} questions
+Change: {change:+.1f}%
+
+━━━━━━━━━━━━━━━━━━━━━
+💡 *Recommendations*
+━━━━━━━━━━━━━━━━━━━━━
+{rec_text}
+"""
+        await self.wa.send_text(phone, message)
+
+    async def _show_parent_subject_breakdown(self, phone: str, user: User) -> None:
+        """Show subject-wise performance breakdown for parent"""
+        if user.role != UserRole.PARENT:
+            await self.wa.send_text(phone, "This feature is only for parents.")
+            return
+
+        student = await self._get_linked_student(user.id)
+        if not student:
+            await self.wa.send_text(
+                phone,
+                "You haven't linked to a student account yet.\n\n"
+                "Ask your child for their 6-digit parent code."
+            )
+            return
+
+        # Get subject-wise stats from question attempts
+        from app.models.curriculum import Question, Subject
+
+        # Get attempts grouped by subject
+        result = await self.db.execute(
+            select(
+                Subject.name,
+                func.count(QuestionAttempt.id).label('total'),
+                func.sum(QuestionAttempt.is_correct.cast(Integer)).label('correct')
+            )
+            .select_from(QuestionAttempt)
+            .join(Question, QuestionAttempt.question_id == Question.id)
+            .join(Subject, Question.subject_id == Subject.id)
+            .where(QuestionAttempt.student_id == student.id)
+            .group_by(Subject.name)
+            .order_by(desc('total'))
+        )
+        subject_stats = result.all()
+
+        if not subject_stats:
+            await self.wa.send_text(
+                phone,
+                f"📚 *Subject Breakdown for {student.first_name}*\n\n"
+                f"No practice data available yet.\n\n"
+                f"Encourage your child to start practicing! 📖"
+            )
+            return
+
+        # Build subject breakdown
+        breakdown_text = ""
+        for subject_name, total, correct in subject_stats:
+            correct = correct or 0
+            accuracy = (correct / total * 100) if total > 0 else 0
+
+            # Performance indicator
+            if accuracy >= 80:
+                indicator = "🟢"
+            elif accuracy >= 60:
+                indicator = "🟡"
+            else:
+                indicator = "🔴"
+
+            breakdown_text += f"{indicator} *{subject_name}*\n"
+            breakdown_text += f"   Questions: {total} | Correct: {correct} | Accuracy: {accuracy:.0f}%\n\n"
+
+        message = f"""📚 *Subject Breakdown for {student.first_name}*
+
+━━━━━━━━━━━━━━━━━━━━━
+{breakdown_text}
+━━━━━━━━━━━━━━━━━━━━━
+Legend:
+🟢 Strong (80%+)
+🟡 Developing (60-79%)
+🔴 Needs attention (<60%)
+"""
+        await self.wa.send_text(phone, message)
+
+    async def _show_parent_notification_settings(self, phone: str, user: User) -> None:
+        """Show and manage parent notification settings"""
+        if user.role != UserRole.PARENT:
+            await self.wa.send_text(phone, "This feature is only for parents.")
+            return
+
+        # Get current notification settings from link
+        result = await self.db.execute(
+            select(ParentStudentLink)
+            .where(ParentStudentLink.parent_user_id == user.id)
+            .where(ParentStudentLink.verified == True)
+        )
+        link = result.scalar_one_or_none()
+
+        if not link:
+            await self.wa.send_text(
+                phone,
+                "You haven't linked to a student account yet."
+            )
+            return
+
+        notifications_enabled = link.notifications_enabled if hasattr(link, 'notifications_enabled') else True
+
+        status = "✅ ON" if notifications_enabled else "❌ OFF"
+
+        await self.wa.send_buttons(
+            to=phone,
+            header="🔔 Notification Settings",
+            body=f"Current status: {status}\n\n"
+                 f"When enabled, you'll receive:\n"
+                 f"• 📊 Weekly progress reports\n"
+                 f"• 🏆 Achievement notifications\n"
+                 f"• ⚠️ Streak warnings\n"
+                 f"• 📅 Activity reminders",
+            buttons=[
+                {"id": "notif_enable", "title": "✅ Enable"},
+                {"id": "notif_disable", "title": "❌ Disable"}
+            ]
+        )
+
+    # ==================== Additional Feature Handlers ====================
+
+    async def _start_quick_quiz(self, phone: str, user: User) -> None:
+        """Start a quick 5-question quiz"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Set up quick quiz flow state
+        state = FlowState(
+            flow_name="practice",
+            step="topic_selection",
+            data={
+                "student_id": str(student.id),
+                "quiz_type": "quick",
+                "num_questions": 5
+            }
+        )
+        await cache.set_json(f"flow_state:{phone}", state.__dict__)
+
+        subjects = student.subjects or ["Mathematics", "English", "Science"]
+
+        await self.wa.send_list(
+            to=phone,
+            header="⚡ Quick Quiz",
+            body="Choose a subject for your 5-question quiz!\n\n"
+                 "Answer quickly for bonus XP! ⏱️",
+            button_text="Select Subject",
+            sections=[{
+                "title": "Subjects",
+                "rows": [
+                    {"id": f"quiz_{s.lower()}", "title": s, "description": f"5 quick questions on {s}"}
+                    for s in subjects[:10]  # WhatsApp limit
+                ]
+            }]
+        )
+
+    async def _show_competitions(self, phone: str, user: User) -> None:
+        """Show available and upcoming competitions"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Check for active competitions
+        # For now, show a coming soon message with engaging content
+        await self.wa.send_text(
+            phone,
+            "🏆 *Competitions*\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "🔜 *Coming Soon!*\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Weekly competitions are being prepared!\n\n"
+            "*What to expect:*\n"
+            "• 📊 Subject-based challenges\n"
+            "• ⏱️ Timed quiz battles\n"
+            "• 🏅 Leaderboards and prizes\n"
+            "• 🎁 XP bonuses for winners\n\n"
+            "*Prepare by:*\n"
+            "1. Practice daily to improve\n"
+            "2. Build your streak 🔥\n"
+            "3. Check back soon!\n\n"
+            "Type *leaderboard* to see current rankings!"
+        )
+
+    async def _show_settings(self, phone: str, user: User) -> None:
+        """Show user settings and options"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        subjects_text = ", ".join(student.subjects[:3]) if student.subjects else "Not set"
+        if student.subjects and len(student.subjects) > 3:
+            subjects_text += f" +{len(student.subjects) - 3} more"
+
+        await self.wa.send_list(
+            to=phone,
+            header="⚙️ Settings",
+            body=f"*Current Profile:*\n"
+                 f"👤 Name: {student.first_name}\n"
+                 f"📚 Level: {student.education_level.value.replace('_', ' ').title()}\n"
+                 f"📖 Grade: {student.grade}\n"
+                 f"📝 Subjects: {subjects_text}\n"
+                 f"🏫 School: {student.school_name or 'Not set'}\n\n"
+                 f"What would you like to update?",
+            button_text="Change Setting",
+            sections=[{
+                "title": "Profile Settings",
+                "rows": [
+                    {"id": "setting_subject", "title": "📚 Change Subject", "description": "Switch your primary subject"},
+                    {"id": "setting_name", "title": "👤 Update Name", "description": "Change your display name"},
+                    {"id": "setting_grade", "title": "📖 Change Grade", "description": "Update your grade/form"},
+                ]
+            }]
+        )
+
+    # ==================== Welcome Back Handler ====================
+
+    async def _send_welcome_back(self, phone: str, user: User, student: Student) -> None:
+        """Send personalized welcome back message for returning users"""
+        xp_system = XPSystem(self.db)
+        stats = await xp_system.get_student_stats(student.id)
+        level_info = xp_system.get_level_info(student.total_xp or 0)
+
+        # Check last activity
+        streak_result = await self.db.execute(
+            select(StudentStreak).where(StudentStreak.student_id == student.id)
+        )
+        streak = streak_result.scalar_one_or_none()
+
+        streak_days = streak.current_streak if streak else 0
+        streak_emoji = "🔥" if streak_days > 0 else "💪"
+
+        # Personalized greeting based on time of day
+        hour = datetime.now().hour
+        if hour < 12:
+            greeting = "Good morning"
+        elif hour < 17:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+
+        message = f"""👋 *{greeting}, {student.first_name}!*
+
+{streak_emoji} Streak: {streak_days} days
+⭐ Level {level_info['level']}: {level_info['title']}
+💎 {student.total_xp or 0:,} XP
+
+Ready to learn something new? 📚
+
+Type *practice* to start a session, or ask me anything!
+"""
+        await self.wa.send_text(phone, message)
+
+    # ==================== Notification & Settings Handlers ====================
+
+    async def _toggle_notifications(self, phone: str, user: User, enable: bool) -> None:
+        """Toggle notification settings for parent"""
+        if user.role != UserRole.PARENT:
+            await self.wa.send_text(phone, "This feature is only for parents.")
+            return
+
+        # Update notification setting in link
+        result = await self.db.execute(
+            select(ParentStudentLink)
+            .where(ParentStudentLink.parent_user_id == user.id)
+            .where(ParentStudentLink.verified == True)
+        )
+        link = result.scalar_one_or_none()
+
+        if not link:
+            await self.wa.send_text(phone, "You haven't linked to a student account yet.")
+            return
+
+        # Update if the column exists
+        if hasattr(link, 'notifications_enabled'):
+            link.notifications_enabled = enable
+            await self.db.commit()
+
+        status = "enabled ✅" if enable else "disabled ❌"
+        await self.wa.send_text(
+            phone,
+            f"🔔 Notifications have been *{status}*\n\n"
+            f"{'You will now receive progress reports and updates.' if enable else 'You will no longer receive automatic notifications.'}\n\n"
+            f"Type *menu* to go back to the main menu."
+        )
+
+    async def _start_name_change(self, phone: str, user: User) -> None:
+        """Start the name change flow"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Set flow state for name change
+        state = FlowState(
+            flow_name="settings",
+            step="change_name",
+            data={"user_id": str(user.id), "student_id": str(student.id)}
+        )
+        await cache.set_json(f"flow_state:{phone}", state.__dict__)
+
+        await self.wa.send_text(
+            phone,
+            f"👤 *Change Name*\n\n"
+            f"Current name: *{student.first_name}*\n\n"
+            f"Please type your new name:\n\n"
+            f"(Type 'cancel' to go back)"
+        )
+
+    async def _start_grade_change(self, phone: str, user: User) -> None:
+        """Start the grade change flow"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Set flow state for grade change
+        state = FlowState(
+            flow_name="settings",
+            step="change_grade",
+            data={"user_id": str(user.id), "student_id": str(student.id)}
+        )
+        await cache.set_json(f"flow_state:{phone}", state.__dict__)
+
+        # Show grade options based on education level
+        level = student.education_level.value
+        grades = {
+            "primary": ["Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"],
+            "secondary": ["Form 1", "Form 2", "Form 3", "Form 4"],
+            "a_level": ["Lower 6", "Upper 6"]
+        }
+
+        grade_list = grades.get(level, grades["secondary"])
+        grade_options = "\n".join(f"• {g}" for g in grade_list)
+
+        await self.wa.send_text(
+            phone,
+            f"📖 *Change Grade*\n\n"
+            f"Current: *{student.grade}*\n"
+            f"Level: *{level.replace('_', ' ').title()}*\n\n"
+            f"Select your new grade:\n{grade_options}\n\n"
+            f"(Type 'cancel' to go back)"
+        )
+
+    async def _start_quiz_with_subject(self, phone: str, user: User, subject: str) -> None:
+        """Start a quick quiz with a specific subject"""
+        student = await self._get_student(user.id)
+        if not student:
+            await self.wa.send_text(phone, "Complete your profile first! Type 'start'.")
+            return
+
+        # Import practice session manager
+        from app.services.practice.session_manager import PracticeSessionManager
+
+        # Get subject ID from database
+        from app.models.curriculum import Subject as SubjectModel
+        result = await self.db.execute(
+            select(SubjectModel).where(SubjectModel.name.ilike(f"%{subject}%"))
+        )
+        subject_record = result.scalar_one_or_none()
+
+        # Initialize session manager with RAG engine
+        session_manager = PracticeSessionManager(self.db, self.rag)
+
+        try:
+            # Start the session
+            session, first_question = await session_manager.start_session(
+                student_id=student.id,
+                subject_id=subject_record.id if subject_record else None,
+                topic_name=subject,
+                session_type="quick_quiz",
+                num_questions=5
+            )
+
+            # Set up practice flow state
+            state = FlowState(
+                flow_name="practice",
+                step="answering",
+                data={
+                    "student_id": str(student.id),
+                    "session_id": str(session.id),
+                    "current_question_id": str(first_question.id),
+                    "hints_used": 0,
+                    "questions_answered": 0,
+                    "quiz_type": "quick"
+                }
+            )
+            await cache.set_json(f"flow_state:{phone}", state.__dict__)
+
+            await self.wa.send_text(
+                phone,
+                f"⚡ *Quick Quiz: {subject}*\n\n"
+                f"📝 5 questions | ⏱️ Answer quickly for bonus XP!\n\n"
+                f"Let's go! 🚀\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"{first_question.formatted_text}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error starting quiz: {e}")
+            await self.wa.send_text(
+                phone,
+                f"Sorry, I couldn't start a quiz for {subject} right now.\n\n"
+                f"Try typing 'practice' to start a regular practice session instead!"
+            )
+
+    # ==================== Settings Flow Handler ====================
+
+    async def _handle_settings_flow(
+        self,
+        phone: str,
+        text: str,
+        user: User,
+        state: FlowState
+    ) -> None:
+        """Handle settings flow steps"""
+        step = state.step
+        text_lower = text.lower().strip()
+
+        # Allow cancellation
+        if text_lower == "cancel":
+            await cache.delete(f"flow_state:{phone}")
+            await self.wa.send_text(phone, "Cancelled. Type *menu* to see options.")
+            return
+
+        if step == "change_name":
+            await self._process_name_change(phone, text, user, state)
+        elif step == "change_grade":
+            await self._process_grade_change(phone, text, user, state)
+
+    async def _process_name_change(
+        self,
+        phone: str,
+        text: str,
+        user: User,
+        state: FlowState
+    ) -> None:
+        """Process name change input"""
+        new_name = text.strip().title()
+
+        # Validate name
+        if len(new_name) < 2 or len(new_name) > 50:
+            await self.wa.send_text(
+                phone,
+                "Please enter a valid name (2-50 characters).\n"
+                "Type 'cancel' to go back."
+            )
+            return
+
+        # Update student name
+        student = await self._get_student(user.id)
+        if student:
+            old_name = student.first_name
+            student.first_name = new_name
+            await self.db.commit()
+
+            await cache.delete(f"flow_state:{phone}")
+            await self.wa.send_text(
+                phone,
+                f"✅ *Name Updated!*\n\n"
+                f"Changed from *{old_name}* to *{new_name}*\n\n"
+                f"Type *menu* to continue."
+            )
+
+    async def _process_grade_change(
+        self,
+        phone: str,
+        text: str,
+        user: User,
+        state: FlowState
+    ) -> None:
+        """Process grade change input"""
+        new_grade = text.strip()
+
+        # Valid grades
+        valid_grades = {
+            "grade 1", "grade 2", "grade 3", "grade 4", "grade 5", "grade 6", "grade 7",
+            "form 1", "form 2", "form 3", "form 4",
+            "lower 6", "upper 6"
+        }
+
+        if new_grade.lower() not in valid_grades:
+            await self.wa.send_text(
+                phone,
+                f"Invalid grade. Please select from the list.\n"
+                f"Type 'cancel' to go back."
+            )
+            return
+
+        # Update student grade
+        student = await self._get_student(user.id)
+        if student:
+            old_grade = student.grade
+            student.grade = new_grade.title()
+            await self.db.commit()
+
+            await cache.delete(f"flow_state:{phone}")
+            await self.wa.send_text(
+                phone,
+                f"✅ *Grade Updated!*\n\n"
+                f"Changed from *{old_grade}* to *{new_grade.title()}*\n\n"
+                f"Your questions will now match your new level! 📚\n\n"
+                f"Type *menu* to continue."
             )
