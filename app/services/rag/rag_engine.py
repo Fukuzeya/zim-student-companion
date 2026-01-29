@@ -610,7 +610,22 @@ Respond with ONLY valid JSON in this format:
                     }
                 )
             )
-            return response.text
+
+            # Check if response has valid content
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                # Check if content was blocked
+                if candidate.finish_reason and candidate.finish_reason.name == "SAFETY":
+                    logger.warning(f"Response blocked by safety filters: {candidate.safety_ratings}")
+                    return self._get_fallback_response()
+                # Check if there's actual content
+                if candidate.content and candidate.content.parts:
+                    return candidate.content.parts[0].text
+
+            # Fallback if no valid content
+            logger.warning("No valid content in Gemini response")
+            return self._get_fallback_response()
+
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             self._stats["errors"] += 1

@@ -264,7 +264,10 @@ Answer:"""
                     )
                 )
             )
-            return response.text
+            # Safely extract text from response
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                return response.candidates[0].content.parts[0].text
+            return query  # Fallback to original query
         except Exception as e:
             logger.warning(f"HyDE generation failed: {e}")
             return query  # Fallback to original query
@@ -325,8 +328,14 @@ Relevance score (0-10):"""
                     )
                 )
             )
-            score = float(re.search(r'(\d+(?:\.\d+)?)', response.text).group(1))
-            return min(score / 10.0, 1.0)
+            # Safely extract text from response
+            response_text = ""
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                response_text = response.candidates[0].content.parts[0].text
+            if response_text:
+                score = float(re.search(r'(\d+(?:\.\d+)?)', response_text).group(1))
+                return min(score / 10.0, 1.0)
+            return 0.5  # Default if no response
         except Exception:
             return 0.5  # Default middle score
 
