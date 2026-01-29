@@ -212,7 +212,7 @@ class HyDERetrieval(RetrievalStrategyBase):
     Generates a hypothetical answer and uses it for retrieval.
     """
     
-    def __init__(self, *args, llm_model: str = "gemini-2.5-flash", **kwargs):
+    def __init__(self, *args, llm_model: str = "gemini-2.0-flash-exp", **kwargs):
         super().__init__(*args, **kwargs)
         self.model = genai.GenerativeModel(llm_model)
     
@@ -279,7 +279,7 @@ Answer:"""
 class Reranker:
     """Rerank retrieved documents for improved relevance"""
     
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, model_name: str = "gemini-2.0-flash-exp"):
         self.model = genai.GenerativeModel(model_name)
     
     async def rerank(

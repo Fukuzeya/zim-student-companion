@@ -122,7 +122,7 @@ class RetrievalConfig:
 @dataclass(frozen=True)
 class GenerationConfig:
     """LLM generation configuration"""
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-2.0-flash-exp"
     temperature: float = 0.7
     top_p: float = 0.9
     top_k: int = 40
@@ -222,7 +222,7 @@ class RAGConfig:
                 top_k=int(os.getenv("RETRIEVAL_TOP_K", "10")),
             ),
             generation=GenerationConfig(
-                model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp"),
                 temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             ),
         )
