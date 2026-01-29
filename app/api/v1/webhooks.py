@@ -170,10 +170,10 @@ async def receive_whatsapp_message(
         # Get raw body for signature verification
         body = await request.body()
         
-        # Verify signature in production
-        if settings.ENVIRONMENT == "production":
+        # Verify signature in production (when DEBUG is False)
+        if not settings.DEBUG:
             signature = request.headers.get("X-Hub-Signature-256", "")
-            if not verify_webhook_signature(body, signature, settings.WHATSAPP_APP_SECRET):
+            if not verify_webhook_signature(body, signature, settings.WHATSAPP_APP_SECRET or ""):
                 logger.warning("Invalid webhook signature")
                 # Still return 200 to not trigger retries
                 return {"status": "invalid_signature"}
@@ -193,18 +193,21 @@ async def receive_whatsapp_message(
             # Parse message
             wa_client = WhatsAppClient()
             message = wa_client.parse_webhook(data)
-            
+
             if message:
+                logger.info(
+                    f"📩 Message received: from={message.from_number}, "
+                    f"type={message.message_type}, text='{message.text[:50] if message.text else 'N/A'}...'"
+                )
                 # Process message in background
                 background_tasks.add_task(
                     process_whatsapp_message,
                     message,
                     data  # Pass original data for context
                 )
-                logger.info(
-                    f"Message queued for processing: "
-                    f"from={message.from_number}, type={message.message_type}"
-                )
+                logger.info(f"✅ Message queued for background processing")
+            else:
+                logger.warning(f"⚠️ Failed to parse message from webhook data: {data}")
         
         elif webhook_type == "status":
             # Handle status update in background
@@ -265,42 +268,51 @@ async def process_whatsapp_message(
 ):
     """
     Process WhatsApp message in background.
-    
+
     Creates fresh database session and uses singleton RAG engine.
     Handles all errors gracefully with user feedback.
     """
     processing_start = time.time()
-    
+    logger.info(f"🔄 Background processing started for {message.from_number}")
+
     # Create fresh database session for background task
     async with async_session_maker() as db:
         try:
             # Get singleton RAG engine
+            logger.debug("Getting RAG engine...")
             rag_engine = await RAGEngineManager.get_engine()
-            
+            logger.debug("✓ RAG engine ready")
+
             # Create WhatsApp client
             wa_client = WhatsAppClient()
-            
+            logger.debug(f"✓ WhatsApp client created (phone_id={settings.WHATSAPP_PHONE_NUMBER_ID})")
+
             # Create message handler
             handler = MessageHandler(wa_client, rag_engine, db)
-            
+            logger.debug("✓ Message handler created")
+
             # Process the message
+            logger.info(f"🤖 Processing message from {message.from_number}...")
             await handler.handle_message(message)
-            
+
             # Log processing time
             processing_time = (time.time() - processing_start) * 1000
             logger.info(
-                f"Message processed: from={message.from_number}, "
+                f"✅ Message processed successfully: from={message.from_number}, "
                 f"time={processing_time:.0f}ms"
             )
-            
+
         except Exception as e:
             logger.exception(
-                f"Error processing message from {message.from_number}: {e}"
+                f"❌ Error processing message from {message.from_number}: {e}"
             )
             get_metrics_collector().record_error()
-            
+
             # Try to send error message to user
-            await _send_error_message(message.from_number)
+            try:
+                await _send_error_message(message.from_number)
+            except Exception as send_err:
+                logger.error(f"❌ Failed to send error message: {send_err}")
 
 
 async def process_status_update(data: Dict[str, Any]):

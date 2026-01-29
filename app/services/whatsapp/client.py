@@ -165,7 +165,10 @@ class WhatsAppClient:
     async def _send_message(self, payload: Dict) -> Dict:
         """Internal method to send messages"""
         url = f"{self.api_url}/{self.phone_number_id}/messages"
-        
+        recipient = payload.get("to", "unknown")
+
+        logger.debug(f"📤 Sending WhatsApp message to {recipient}, type={payload.get('type')}")
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
@@ -175,9 +178,18 @@ class WhatsAppClient:
                     timeout=30.0
                 )
                 response.raise_for_status()
-                return response.json()
+                result = response.json()
+                logger.info(f"✅ Message sent successfully to {recipient}: {result.get('messages', [{}])[0].get('id', 'N/A')}")
+                return result
+            except httpx.HTTPStatusError as e:
+                error_body = e.response.text if e.response else "No response body"
+                logger.error(
+                    f"❌ WhatsApp API HTTP error: status={e.response.status_code if e.response else 'N/A'}, "
+                    f"response={error_body}, url={url}"
+                )
+                raise
             except httpx.HTTPError as e:
-                logger.error(f"WhatsApp API error: {e}")
+                logger.error(f"❌ WhatsApp API error: {type(e).__name__}: {e}")
                 raise
     
     @staticmethod
