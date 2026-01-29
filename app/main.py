@@ -200,11 +200,9 @@ app = FastAPI(
     description="AI-powered ZIMSEC/Cambridge study companion for Zimbabwean students",
     version="2.0.0",
     lifespan=lifespan,
-    # This is the crucial addition:
-    root_path="/api", 
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json"
 )
 
 
