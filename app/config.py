@@ -1,6 +1,7 @@
 import secrets
 import hashlib
-from pydantic_settings import BaseSettings
+import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, model_validator
 from functools import lru_cache
 from typing import Optional
@@ -100,11 +101,20 @@ class Settings(BaseSettings):
     BASIC_DAILY_QUESTIONS: int = 50
     PREMIUM_DAILY_QUESTIONS: int = 1000
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "ignore"  # Ignore extra fields in .env
+    # Pydantic v2 settings configuration
+    # env_file is only loaded if it exists; environment variables ALWAYS take priority
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    # Log critical settings for debugging (without exposing secrets)
+    db_host = settings.DATABASE_URL.split("@")[-1].split("/")[0] if "@" in settings.DATABASE_URL else "unknown"
+    print(f"[CONFIG] Loaded settings - DB Host: {db_host}, Debug: {settings.DEBUG}")
+    return settings
