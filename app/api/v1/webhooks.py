@@ -20,8 +20,12 @@ import hmac
 import time
 from typing import Optional, Dict, Any
 
+import asyncio
 from app.core.database import get_db, async_session_maker
 from app.config import get_settings
+
+# Timeout for message processing (seconds)
+MESSAGE_PROCESSING_TIMEOUT = 55  # WhatsApp typically expects response within 60s
 from app.services.whatsapp.client import WhatsAppClient, WhatsAppMessage
 from app.services.whatsapp.handlers import MessageHandler
 
@@ -206,16 +210,11 @@ async def receive_whatsapp_message(
                     f"type={message.message_type}, text='{message.text[:50] if message.text else 'N/A'}...'"
                 )
 
-                # Process message DIRECTLY first (for debugging) instead of background
-                # This helps us see errors immediately
-                logger.info("🚀 Starting DIRECT message processing (not background)...")
-                try:
-                    await process_whatsapp_message(message, data)
-                    logger.info("✅ Direct processing completed successfully")
-                except Exception as proc_error:
-                    logger.exception(f"❌ DIRECT PROCESSING FAILED: {proc_error}")
-                    # Re-raise to see the error
-                    raise
+                # Process message in BACKGROUND to respond quickly to WhatsApp
+                # WhatsApp expects a quick 200 response, then we process async
+                logger.info("🚀 Adding message to background processing queue...")
+                background_tasks.add_task(process_whatsapp_message, message, data)
+                logger.info("✅ Message queued for background processing")
             else:
                 logger.warning(f"⚠️ Failed to parse message from webhook data")
                 logger.warning(f"⚠️ Data that failed to parse: {data}")
@@ -278,7 +277,7 @@ async def process_whatsapp_message(
     raw_data: Dict[str, Any]
 ):
     """
-    Process WhatsApp message in background.
+    Process WhatsApp message in background with timeout protection.
 
     Creates fresh database session and uses singleton RAG engine.
     Handles all errors gracefully with user feedback.
@@ -288,6 +287,34 @@ async def process_whatsapp_message(
     logger.info(f"🔄 PROCESSING MESSAGE from {message.from_number}")
     logger.info("=" * 50)
 
+    try:
+        # Wrap entire processing with timeout
+        await asyncio.wait_for(
+            _process_message_internal(message, raw_data, processing_start),
+            timeout=MESSAGE_PROCESSING_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"⏰ TIMEOUT: Message processing exceeded {MESSAGE_PROCESSING_TIMEOUT}s for {message.from_number}")
+        get_metrics_collector().record_error()
+        # Try to send timeout message to user
+        try:
+            wa_client = WhatsAppClient()
+            await wa_client.send_text(
+                message.from_number,
+                "Sorry, your request is taking longer than expected. Please try again. 🙏"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send timeout message: {e}")
+    except Exception as e:
+        logger.exception(f"❌ Unexpected error in process_whatsapp_message: {e}")
+
+
+async def _process_message_internal(
+    message: WhatsAppMessage,
+    raw_data: Dict[str, Any],
+    processing_start: float
+):
+    """Internal message processing with full error handling."""
     # Create fresh database session for background task
     logger.info("📊 Creating database session...")
     try:
@@ -339,6 +366,15 @@ async def process_whatsapp_message(
                     logger.error(f"❌ Failed to send error message: {send_err}")
     except Exception as db_error:
         logger.exception(f"❌ DATABASE SESSION ERROR: {db_error}")
+        # Try to notify user of database error
+        try:
+            wa_client = WhatsAppClient()
+            await wa_client.send_text(
+                message.from_number,
+                "Sorry, I'm having trouble connecting to my database. Please try again shortly. 🙏"
+            )
+        except Exception:
+            pass
 
 
 async def process_status_update(data: Dict[str, Any]):
