@@ -1,0 +1,79 @@
+[33mca9070d[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m updated response text
+[33me2c3737[m updated safety on response text
+[33m5591ec8[m[33m ([m[1;31morigin/main[m[33m)[m updated gemini key varibale
+[33m857621e[m added root path
+[33mb370d89[m updated background tasks
+[33m2063878[m updated webhook url
+[33m569ed7f[m implemented direct processing of messages
+[33me563e0d[m updated config whatsapp url
+[33m4d9dc4a[m added webhook logs
+[33mfdc27b3[m updated config file
+[33md43c097[m updated main
+[33md29e05b[m updated whatsapp endpoints
+[33m8a58482[m updated whatsapp verifaction token
+[33m1d54ee6[m redo
+[33m91e27e0[m updated webhook
+[33m2054175[m updated config
+[33m02ee8c9[m updated nginxx
+[33m006fe85[m updated config file
+[33mfdcbc76[m update routing 2
+[33mf2e6e6c[m update routing
+[33mce81739[m updated nginx
+[33m9202f7b[m corrected main.py
+[33m0d7fc62[m updated nginx links
+[33mf1ea013[m updated angular prod environments
+[33m6c20570[m Updated nginx file
+[33mfc60c7e[m Updated celery images
+[33m5d39f1a[m corrected angular builderrors
+[33mcaed3a3[m updated nodejs
+[33m6391583[m updated frontend nginx
+[33mc7f80b4[m updated github action
+[33m594e0f6[m added frontend config
+[33m47da8f9[m added frontend
+[33meb608d9[m updated conflicting postgres ports
+[33m1b5e333[m updated admin endpoints
+[33ma336cea[m Updated whatsapp variables
+[33m443fdd5[m updated pipeline codew
+[33ma76c2d8[m updated pipeline code
+[33md75fae3[m updated endpoints
+[33mff48d66[m Update routes
+[33m3a1f403[m added administration endpoints
+[33m0a161cb[m Secure Domain final
+[33m5249730[m Secure Domain
+[33m1f10bd1[m Updated nginx configuration
+[33m2fd77a9[m Updated nginx configs
+[33m2d347a0[m Deployment Update
+[33m3fc7834[m updated whatsapp settings 2
+[33m0eb5c0c[m updated whatsapp settings
+[33m0737b1d[m Execute Deployment on Server Final 4
+[33m49cfabd[m Execute Deployment on Server Final 3
+[33mf64e367[m Execute Deployment on Server Final 2
+[33m5856962[m Execute Deployment on Server Final
+[33m91b32b3[m Execute Deployment on Server 4
+[33m1801c83[m Execute Deployment on Server 2
+[33m136af7e[m Execute Deployment on Server
+[33m204d156[m Clean and Prepare Tag Variable 4
+[33m17db237[m Clean and Prepare Tag Variable 3
+[33m04ccfb1[m Clean and Prepare Tag Variable 2
+[33m0e58684[m Clean and Prepare Tag Variable
+[33m6783a03[m updated pipline 3
+[33mbcabb6b[m updated pipline
+[33m91107c2[m changes from chatgpt 2
+[33mb716852[m changes from chatgpt
+[33mf121545[m final test
+[33mae20439[m updated pipe
+[33m7b43018[m updated pipeline a
+[33mb643703[m Updated pipeline final stage
+[33m4dc5155[m Updated Execute Deployment stage 2
+[33m1e7599b[m Updated Execute Deployment stage
+[33mb5a6aaa[m Corrected deployment pipeline
+[33m674a5e2[m Updated deployment pipeline
+[33m6d864a7[m fix ssh private key
+[33meeb7161[m corrected pipeline
+[33m8539c00[m updated workflow
+[33m8624dac[m updated deployment pipeline
+[33m9df98fe[m updated RAG pipeline
+[33mea8cb0d[m added structure
+[33ma471e7e[m added project structure
+[33m8038bdd[m Remove default value for GEMINI_API_KEY
+[33m67a7377[m Initial Commit

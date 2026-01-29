@@ -1,6 +1,7 @@
 venv/
 .env
 .env.production
+.env.*
 __pycache__/
 *.pyc
 .DS_Store
