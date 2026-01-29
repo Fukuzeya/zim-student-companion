@@ -197,7 +197,7 @@ async def lifespan(app: FastAPI):
 # ============================================================================
 app = FastAPI(
     title=settings.APP_NAME,
-    description="AI-powered ZIMSEC study companion for Zimbabwean students",
+    description="AI-powered ZIMSEC/Cambridge study companion for Zimbabwean students",
     version="2.0.0",
     lifespan=lifespan,
     # This is the crucial addition:
