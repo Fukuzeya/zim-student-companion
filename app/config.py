@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     WHATSAPP_APP_SECRET : Optional[str] = Field(None, env="WHATSAPP_APP_SECRET")
     
     # Paynow - Optional with empty defaults
-    PAYNOW_INTEGRATION_ID: str = ""
+    PAYNOW_INTEGRATION_ID: str = "key"
     PAYNOW_INTEGRATION_KEY: str = ""
     PAYNOW_RESULT_URL: str = "http://localhost:8000/api/v1/payments/webhook/paynow"
     PAYNOW_RETURN_URL: str = "http://localhost:8000/payment/success"
