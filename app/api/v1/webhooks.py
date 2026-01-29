@@ -155,21 +155,27 @@ async def receive_whatsapp_message(
 ):
     """
     Receive WhatsApp messages and events.
-    
+
     Handles:
     - Incoming messages (text, button replies, list replies)
     - Message status updates (sent, delivered, read)
     - Error notifications
-    
+
     Note: Always returns 200 to acknowledge receipt to WhatsApp.
     Processing happens in background to respond quickly.
     """
     start_time = time.time()
-    
+
+    # Log immediately when webhook is hit
+    logger.info("=" * 60)
+    logger.info("🔔 WEBHOOK HIT - WhatsApp POST request received!")
+    logger.info("=" * 60)
+
     try:
         # Get raw body for signature verification
         body = await request.body()
-        
+        logger.info(f"📦 Raw body length: {len(body)} bytes")
+
         # Verify signature in production (when DEBUG is False)
         if not settings.DEBUG:
             signature = request.headers.get("X-Hub-Signature-256", "")
@@ -177,17 +183,17 @@ async def receive_whatsapp_message(
                 logger.warning("Invalid webhook signature")
                 # Still return 200 to not trigger retries
                 return {"status": "invalid_signature"}
-        
+        else:
+            logger.info("⚠️ DEBUG mode - skipping signature verification")
+
         # Parse JSON payload
         data = await request.json()
-        
+        logger.info(f"📄 Parsed JSON data: {data}")
+
         # Log webhook type
         webhook_type = _get_webhook_type(data)
-        logger.info(f"Received WhatsApp webhook: type={webhook_type}")
-        
-        if settings.DEBUG:
-            logger.debug(f"Webhook payload: {data}")
-        
+        logger.info(f"📋 Webhook type detected: {webhook_type}")
+
         # Route based on webhook type
         if webhook_type == "message":
             # Parse message
@@ -196,18 +202,23 @@ async def receive_whatsapp_message(
 
             if message:
                 logger.info(
-                    f"📩 Message received: from={message.from_number}, "
+                    f"📩 Message parsed successfully: from={message.from_number}, "
                     f"type={message.message_type}, text='{message.text[:50] if message.text else 'N/A'}...'"
                 )
-                # Process message in background
-                background_tasks.add_task(
-                    process_whatsapp_message,
-                    message,
-                    data  # Pass original data for context
-                )
-                logger.info(f"✅ Message queued for background processing")
+
+                # Process message DIRECTLY first (for debugging) instead of background
+                # This helps us see errors immediately
+                logger.info("🚀 Starting DIRECT message processing (not background)...")
+                try:
+                    await process_whatsapp_message(message, data)
+                    logger.info("✅ Direct processing completed successfully")
+                except Exception as proc_error:
+                    logger.exception(f"❌ DIRECT PROCESSING FAILED: {proc_error}")
+                    # Re-raise to see the error
+                    raise
             else:
-                logger.warning(f"⚠️ Failed to parse message from webhook data: {data}")
+                logger.warning(f"⚠️ Failed to parse message from webhook data")
+                logger.warning(f"⚠️ Data that failed to parse: {data}")
         
         elif webhook_type == "status":
             # Handle status update in background
@@ -273,46 +284,61 @@ async def process_whatsapp_message(
     Handles all errors gracefully with user feedback.
     """
     processing_start = time.time()
-    logger.info(f"🔄 Background processing started for {message.from_number}")
+    logger.info("=" * 50)
+    logger.info(f"🔄 PROCESSING MESSAGE from {message.from_number}")
+    logger.info("=" * 50)
 
     # Create fresh database session for background task
-    async with async_session_maker() as db:
-        try:
-            # Get singleton RAG engine
-            logger.debug("Getting RAG engine...")
-            rag_engine = await RAGEngineManager.get_engine()
-            logger.debug("✓ RAG engine ready")
+    logger.info("📊 Creating database session...")
+    try:
+        async with async_session_maker() as db:
+            logger.info("✓ Database session created")
 
-            # Create WhatsApp client
-            wa_client = WhatsAppClient()
-            logger.debug(f"✓ WhatsApp client created (phone_id={settings.WHATSAPP_PHONE_NUMBER_ID})")
-
-            # Create message handler
-            handler = MessageHandler(wa_client, rag_engine, db)
-            logger.debug("✓ Message handler created")
-
-            # Process the message
-            logger.info(f"🤖 Processing message from {message.from_number}...")
-            await handler.handle_message(message)
-
-            # Log processing time
-            processing_time = (time.time() - processing_start) * 1000
-            logger.info(
-                f"✅ Message processed successfully: from={message.from_number}, "
-                f"time={processing_time:.0f}ms"
-            )
-
-        except Exception as e:
-            logger.exception(
-                f"❌ Error processing message from {message.from_number}: {e}"
-            )
-            get_metrics_collector().record_error()
-
-            # Try to send error message to user
             try:
-                await _send_error_message(message.from_number)
-            except Exception as send_err:
-                logger.error(f"❌ Failed to send error message: {send_err}")
+                # Get singleton RAG engine
+                logger.info("🤖 Getting RAG engine...")
+                rag_engine = await RAGEngineManager.get_engine()
+                logger.info("✓ RAG engine ready")
+
+                # Create WhatsApp client
+                logger.info("📱 Creating WhatsApp client...")
+                wa_client = WhatsAppClient()
+                logger.info(f"✓ WhatsApp client created")
+                logger.info(f"   - API URL: {wa_client.api_url}")
+                logger.info(f"   - Phone ID: {wa_client.phone_number_id}")
+                logger.info(f"   - Token (first 20 chars): {wa_client.token[:20] if wa_client.token else 'NONE'}...")
+
+                # Create message handler
+                logger.info("🔧 Creating message handler...")
+                handler = MessageHandler(wa_client, rag_engine, db)
+                logger.info("✓ Message handler created")
+
+                # Process the message
+                logger.info(f"🚀 Calling handler.handle_message() for {message.from_number}...")
+                await handler.handle_message(message)
+
+                # Log processing time
+                processing_time = (time.time() - processing_start) * 1000
+                logger.info(
+                    f"✅ Message processed successfully: from={message.from_number}, "
+                    f"time={processing_time:.0f}ms"
+                )
+
+            except Exception as e:
+                logger.exception(
+                    f"❌ Error processing message from {message.from_number}: {e}"
+                )
+                get_metrics_collector().record_error()
+
+                # Try to send error message to user
+                try:
+                    logger.info("📤 Attempting to send error message to user...")
+                    await _send_error_message(message.from_number)
+                    logger.info("✓ Error message sent")
+                except Exception as send_err:
+                    logger.error(f"❌ Failed to send error message: {send_err}")
+    except Exception as db_error:
+        logger.exception(f"❌ DATABASE SESSION ERROR: {db_error}")
 
 
 async def process_status_update(data: Dict[str, Any]):
