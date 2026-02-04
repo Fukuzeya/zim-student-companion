@@ -33,10 +33,12 @@ services:
       - 8000
       
     depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - celery_worker
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
   
   # ----------------------------------------
   # 2. Angular Frontend (The UI)
