@@ -9,7 +9,7 @@ from typing import Optional
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "Zim Student Companion"
-    DEBUG: bool = True  # CHANGED: Default to True for development
+    DEBUG: bool = False  # CHANGED: Default to True for development
     SECRET_KEY: str = "dev-secret-key-change-in-production"  # Default for dev
     API_V1_PREFIX: str = "/v1"
     
