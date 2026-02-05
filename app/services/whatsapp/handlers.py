@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 class Commands:
     """User command definitions"""
+    GREETING = {"hi", "hello", "hey", "hie", "howzit", "good morning", "good afternoon", "good evening", "yo", "sup"}
     MENU = {"menu", "help", "start", "home"}
     PRACTICE = {"practice", "quiz", "test", "questions"}
     EXPLAIN = {"explain", "teach", "learn"}
@@ -225,6 +226,16 @@ class MessageHandler:
                 return await self._handle_menu_item(phone, text_lower, user)
 
         # ===== Text Commands =====
+
+        # Greeting - respond directly without RAG
+        if text_lower in Commands.GREETING:
+            name = user.first_name or "there"
+            await self.wa.send_text(
+                phone,
+                f"Hey {name}! 👋 How can I help you today?\n\n"
+                "Type *menu* to see what I can do, or just ask me a question!"
+            )
+            return True
 
         # Menu/Help
         if text_lower in Commands.MENU:
