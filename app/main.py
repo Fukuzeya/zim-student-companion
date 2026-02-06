@@ -68,14 +68,52 @@ async def lifespan(app: FastAPI):
     
     # ==================== Initialize Database ====================
     from app.core.database import engine, Base
-    
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Database tables created/verified")
-    except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
-        raise
+    import asyncio
+
+    # Log all relevant settings for debugging
+    logger.info("=" * 60)
+    logger.info("🔧 CONFIGURATION CHECK")
+    logger.info("=" * 60)
+    logger.info(f"DEBUG: {settings.DEBUG}")
+    logger.info(f"DATABASE_URL host: {settings.DATABASE_URL.split('@')[-1].split('/')[0] if '@' in settings.DATABASE_URL else 'unknown'}")
+    logger.info(f"REDIS_URL: {settings.REDIS_URL}")
+    logger.info(f"QDRANT_HOST: {settings.QDRANT_HOST}")
+    logger.info(f"WHATSAPP_TOKEN present: {bool(settings.WHATSAPP_TOKEN)}")
+    logger.info(f"WHATSAPP_APP_SECRET present: {bool(settings.WHATSAPP_APP_SECRET)}")
+    logger.info(f"GEMINI_API_KEY present: {bool(settings.GEMINI_API_KEY)}")
+    logger.info("=" * 60)
+
+    # Small initial delay to ensure postgres is fully ready
+    logger.info("⏳ Waiting 3 seconds for database to stabilize...")
+    await asyncio.sleep(3)
+
+    # Retry database connection with backoff
+    max_retries = 5
+    retry_delay = 3
+
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 Attempting database connection (attempt {attempt + 1}/{max_retries})...")
+            async with engine.begin() as conn:
+                # Test the connection first with a simple query
+                from sqlalchemy import text
+                await conn.execute(text("SELECT 1"))
+                logger.info("✓ Database connection test passed")
+                # Now create tables
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("✅ Database tables created/verified")
+            break
+        except Exception as e:
+            logger.error(f"❌ Database error type: {type(e).__name__}")
+            logger.error(f"❌ Database error: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ Database connection failed (attempt {attempt + 1})")
+                logger.info(f"⏳ Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                logger.error(f"❌ Database initialization failed after {max_retries} attempts")
+                raise
     
     # ==================== Initialize Redis ====================
     redis_client = None
