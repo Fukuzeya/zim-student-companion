@@ -162,10 +162,22 @@ class MessageHandler:
         logger.info(f"💬 Text: {message.text}")
 
         try:
-            # Mark as read immediately
+            # Detect Meta's test webhook payloads (fake phone numbers)
+            # Meta uses these specific test phone numbers in their sample payloads
+            test_phone_numbers = {"16315551181", "16505551111", "15551234567"}
+            if phone in test_phone_numbers or message.message_id == "ABGGFlA5Fpa":
+                logger.info("🧪 TEST WEBHOOK DETECTED - This is Meta's test payload, not a real message")
+                logger.info("✓ Test webhook handled successfully - no response sent to fake number")
+                return  # Don't process test messages
+
+            # Mark as read immediately (non-fatal if it fails)
             logger.info("👁️ Marking message as read...")
-            await self.wa.mark_as_read(message.message_id)
-            logger.info("✓ Message marked as read")
+            try:
+                await self.wa.mark_as_read(message.message_id)
+                logger.info("✓ Message marked as read")
+            except Exception as mark_err:
+                # mark_as_read failure shouldn't stop message processing
+                logger.warning(f"⚠️ Could not mark message as read (continuing anyway): {mark_err}")
 
             # Get or create user
             logger.info("👤 Getting/creating user...")
