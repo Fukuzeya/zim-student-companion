@@ -166,63 +166,114 @@ class WhatsAppClient:
         """Internal method to send messages"""
         url = f"{self.api_url}/{self.phone_number_id}/messages"
         recipient = payload.get("to", "unknown")
+        msg_type = payload.get("type", "unknown")
 
-        logger.debug(f"📤 Sending WhatsApp message to {recipient}, type={payload.get('type')}")
+        logger.info("=" * 40)
+        logger.info(f"📤 SENDING MESSAGE TO WHATSAPP")
+        logger.info("=" * 40)
+        logger.info(f"📍 URL: {url}")
+        logger.info(f"👤 Recipient: {recipient}")
+        logger.info(f"📝 Type: {msg_type}")
+        logger.info(f"🔑 Token present: {bool(self.token)}")
+        logger.info(f"🔑 Token length: {len(self.token) if self.token else 0}")
+
+        # Log payload (but truncate long text bodies)
+        log_payload = payload.copy()
+        if log_payload.get("text", {}).get("body"):
+            body = log_payload["text"]["body"]
+            if len(body) > 100:
+                log_payload["text"]["body"] = body[:100] + "...[truncated]"
+        logger.info(f"📦 Payload: {log_payload}")
 
         async with httpx.AsyncClient() as client:
             try:
+                logger.info("🚀 Making HTTP POST request...")
                 response = await client.post(
                     url,
                     json=payload,
                     headers=self.headers,
                     timeout=30.0
                 )
+                logger.info(f"📬 Response status: {response.status_code}")
+                logger.info(f"📬 Response headers: {dict(response.headers)}")
+
                 response.raise_for_status()
                 result = response.json()
-                logger.info(f"✅ Message sent successfully to {recipient}: {result.get('messages', [{}])[0].get('id', 'N/A')}")
+                logger.info(f"✅ Message sent successfully!")
+                logger.info(f"✅ Response: {result}")
                 return result
             except httpx.HTTPStatusError as e:
                 error_body = e.response.text if e.response else "No response body"
-                logger.error(
-                    f"❌ WhatsApp API HTTP error: status={e.response.status_code if e.response else 'N/A'}, "
-                    f"response={error_body}, url={url}"
-                )
+                logger.error("=" * 40)
+                logger.error(f"❌ WHATSAPP API HTTP ERROR")
+                logger.error("=" * 40)
+                logger.error(f"❌ Status code: {e.response.status_code if e.response else 'N/A'}")
+                logger.error(f"❌ Response body: {error_body}")
+                logger.error(f"❌ URL: {url}")
+                logger.error(f"❌ Payload sent: {log_payload}")
                 raise
             except httpx.HTTPError as e:
-                logger.error(f"❌ WhatsApp API error: {type(e).__name__}: {e}")
+                logger.error("=" * 40)
+                logger.error(f"❌ WHATSAPP API CONNECTION ERROR")
+                logger.error("=" * 40)
+                logger.error(f"❌ Error type: {type(e).__name__}")
+                logger.error(f"❌ Error message: {e}")
                 raise
     
     @staticmethod
     def parse_webhook(data: Dict) -> Optional[WhatsAppMessage]:
         """Parse incoming webhook data"""
+        logger.info("=" * 40)
+        logger.info("🔍 PARSING WEBHOOK DATA")
+        logger.info("=" * 40)
+
         try:
+            logger.info(f"📥 Raw webhook data keys: {list(data.keys())}")
+
             entry = data.get("entry", [{}])[0]
+            logger.info(f"📋 Entry keys: {list(entry.keys()) if entry else 'EMPTY'}")
+
             changes = entry.get("changes", [{}])[0]
+            logger.info(f"📋 Changes keys: {list(changes.keys()) if changes else 'EMPTY'}")
+
             value = changes.get("value", {})
+            logger.info(f"📋 Value keys: {list(value.keys()) if value else 'EMPTY'}")
+
             messages = value.get("messages", [])
-            
+            logger.info(f"📬 Messages count: {len(messages)}")
+
             if not messages:
+                logger.warning("⚠️ No messages found in webhook data")
+                logger.warning(f"⚠️ Full value object: {value}")
                 return None
-            
+
             msg = messages[0]
+            logger.info(f"📩 First message: {msg}")
+
             message = WhatsAppMessage(
                 message_id=msg.get("id"),
                 from_number=msg.get("from"),
                 timestamp=msg.get("timestamp"),
                 message_type=msg.get("type")
             )
-            
+
             if msg.get("type") == "text":
                 message.text = msg.get("text", {}).get("body")
+                logger.info(f"📝 Text message: '{message.text}'")
             elif msg.get("type") == "interactive":
                 interactive = msg.get("interactive", {})
+                logger.info(f"🔘 Interactive type: {interactive.get('type')}")
                 if interactive.get("type") == "button_reply":
                     message.button_reply = interactive.get("button_reply")
+                    logger.info(f"🔘 Button reply: {message.button_reply}")
                 elif interactive.get("type") == "list_reply":
                     message.list_reply = interactive.get("list_reply")
+                    logger.info(f"📋 List reply: {message.list_reply}")
                 message.interactive_reply = interactive
-            
+
+            logger.info(f"✅ Parsed message: id={message.message_id}, from={message.from_number}, type={message.message_type}")
             return message
         except Exception as e:
-            logger.error(f"Error parsing webhook: {e}")
+            logger.exception(f"❌ Error parsing webhook: {e}")
+            logger.error(f"❌ Failed data: {data}")
             return None

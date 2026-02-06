@@ -144,7 +144,7 @@ class MessageHandler:
     async def handle_message(self, message: WhatsAppMessage) -> None:
         """
         Main message handler - routes to appropriate handler.
-        
+
         Flow:
         1. Mark message as read
         2. Get/create user
@@ -152,50 +152,79 @@ class MessageHandler:
         4. Route based on command or flow state
         """
         phone = message.from_number
-        
+
+        logger.info("=" * 50)
+        logger.info(f"🎯 HANDLER: handle_message() STARTED")
+        logger.info("=" * 50)
+        logger.info(f"📱 Phone: {phone}")
+        logger.info(f"📩 Message ID: {message.message_id}")
+        logger.info(f"📝 Message type: {message.message_type}")
+        logger.info(f"💬 Text: {message.text}")
+
         try:
             # Mark as read immediately
+            logger.info("👁️ Marking message as read...")
             await self.wa.mark_as_read(message.message_id)
+            logger.info("✓ Message marked as read")
 
             # Get or create user
+            logger.info("👤 Getting/creating user...")
             user, is_first_message_today = await self._get_or_create_user(phone)
             if not user:
+                logger.info("⚠️ No user returned - onboarding started")
                 return  # Onboarding started
+            logger.info(f"✓ User found: id={user.id}, role={user.role}, name={user.first_name}")
 
             # Send welcome back message for returning users (first message of the day)
             if is_first_message_today and user.role == UserRole.STUDENT:
+                logger.info("🌅 First message today - sending welcome back")
                 student = await self._get_student(user.id)
                 if student:
                     await self._send_welcome_back(phone, user, student)
-            
+
             # Get current flow state
+            logger.info("🔄 Checking flow state...")
             state = await self._get_flow_state(phone)
-            
+            logger.info(f"📋 Flow state: {state.flow_name if state else 'NONE'}")
+
             # Extract message text
+            logger.info("📝 Extracting message text...")
             text = self._get_message_text(message)
-            
+            logger.info(f"💬 Extracted text: '{text}'")
+
             if not text:
+                logger.warning("⚠️ No text extracted from message")
                 await self.wa.send_text(
                     phone,
                     "I can only understand text messages right now. "
                     "Please type your question! 📝"
                 )
                 return
-            
+
             # Check for global commands first
+            logger.info(f"🎮 Checking if '{text}' is a command...")
             command_handled = await self._handle_commands(phone, text, user, state)
             if command_handled:
+                logger.info("✅ Command was handled, returning")
                 return
-            
+            logger.info("⏭️ Not a command, continuing...")
+
             # Route based on flow state
             if state:
+                logger.info(f"🔄 Routing by flow state: {state.flow_name}")
                 await self._route_by_state(phone, message, text, user, state)
             else:
                 # General conversation - use RAG
+                logger.info("🤖 No flow state - routing to RAG for general query")
                 await self._handle_general_query(phone, text, user)
-                
+
+            logger.info("=" * 50)
+            logger.info(f"✅ HANDLER: handle_message() COMPLETED SUCCESSFULLY")
+            logger.info("=" * 50)
+
         except Exception as e:
-            logger.exception(f"Error handling message from {phone}: {e}")
+            logger.exception(f"❌ Error handling message from {phone}: {e}")
+            logger.info("📤 Sending error message to user...")
             await self.wa.send_text(
                 phone,
                 "Oops! Something went wrong 🙈 Please try again in a moment."
@@ -215,30 +244,37 @@ class MessageHandler:
         Handle global commands and menu item callbacks. Returns True if command was handled.
         """
         text_lower = text.lower().strip()
+        logger.info(f"🔍 _handle_commands: checking '{text_lower}'")
 
         # ===== Menu Item Callbacks (from interactive buttons/lists) =====
         if text_lower in Commands.MENU_ITEMS:
+            logger.info(f"✓ Matched MENU_ITEMS: {text_lower}")
             return await self._handle_menu_item(phone, text_lower, user)
 
         # Check for dynamic menu items (like quiz_mathematics)
         for prefix in Commands.DYNAMIC_PREFIXES:
             if text_lower.startswith(prefix):
+                logger.info(f"✓ Matched DYNAMIC_PREFIX: {prefix}")
                 return await self._handle_menu_item(phone, text_lower, user)
 
         # ===== Text Commands =====
 
         # Greeting - respond directly without RAG
         if text_lower in Commands.GREETING:
+            logger.info(f"✓ Matched GREETING command: '{text_lower}'")
             name = user.first_name or "there"
+            logger.info(f"📤 Sending greeting response to {phone}...")
             await self.wa.send_text(
                 phone,
                 f"Hey {name}! 👋 How can I help you today?\n\n"
                 "Type *menu* to see what I can do, or just ask me a question!"
             )
+            logger.info(f"✅ Greeting response sent")
             return True
 
         # Menu/Help
         if text_lower in Commands.MENU:
+            logger.info(f"✓ Matched MENU command")
             await self.flow.show_main_menu(phone, user)
             return True
 

@@ -132,12 +132,22 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
+      QDRANT_HOST: qdrant
+      SECRET_KEY: ${SECRET_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
       WHATSAPP_BUSINESS_ACCOUNT_ID: ${WHATSAPP_BUSINESS_ACCOUNT_ID}
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: celery -A app.tasks.celery_app worker --loglevel=info
 
   # ----------------------------------------
@@ -149,13 +159,22 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
+      QDRANT_HOST: qdrant
+      SECRET_KEY: ${SECRET_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
       WHATSAPP_BUSINESS_ACCOUNT_ID: ${WHATSAPP_BUSINESS_ACCOUNT_ID}
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
-
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: celery -A app.tasks.celery_app beat --loglevel=info
 
 volumes:
