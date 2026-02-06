@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 from app.config import get_settings
+import json
 
 settings = get_settings()
 
@@ -21,17 +22,24 @@ if database_url.startswith("postgresql://"):
 db_host = database_url.split('@')[1] if '@' in database_url else database_url
 print(f"[DB] Connecting to database: {db_host}")
 
-engine = create_async_engine(
-    database_url,
-    echo=settings.DEBUG,
-    pool_size=5,
-    max_overflow=10,
-    pool_pre_ping=True,
-    pool_recycle=300,  # Recycle connections after 5 minutes
-    connect_args={
-        "command_timeout": 60,  # Query timeout in seconds
-    },
-)
+# Use NullPool in production to avoid connection pooling issues with asyncpg
+# The asyncpg JSON codec setup can fail with pooled connections
+if settings.DEBUG:
+    # Development: use connection pooling
+    engine = create_async_engine(
+        database_url,
+        echo=True,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+    )
+else:
+    # Production: use NullPool to avoid asyncpg codec issues
+    engine = create_async_engine(
+        database_url,
+        echo=False,
+        poolclass=NullPool,
+    )
 
 async_session_maker = async_sessionmaker(
     engine,
